@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "salesEnd": "2020-02-14",
+  "inventoryCapturedLocal": "虚构演示：2020-02-15 08:00 北京时间",
+  "inventoryCapturedAtISO": "2020-02-15T00:00:00+00:00",
+  "source": "完全虚构的演示数据；不是任何店铺的库存或销量",
+  "rows": [
+    {
+      "sku": "DEMO-ALPHA-Blue-6", "style": "DEMO-ALPHA", "styleLabel": "示例 A · 演示便鞋",
+      "color": "Blue", "colorLabel": "蓝色", "size": "6", "cnSize": "36", "sizeOrder": 1,
+      "n7": 3, "p7": 2, "n14": 5, "n28": 9, "fbm7": 1,
+      "inventoryKnown": true, "orderMultiple": 2, "minimumOrder": 24, "cartonQuantity": 12,
+      "inventory": {"afn_fulfillable_quantity": 3, "afn_reserved_quantity": 1, "reserved_customerorders": 1, "reserved_fc_processing": 0, "reserved_fc_transfers": 0, "afn_inbound_receiving_quantity": 0, "afn_inbound_shipped_quantity": 0, "afn_inbound_working_quantity": 0},
+      "baseline": null, "baselineDate": null, "baselineKind": null, "currentSold": null, "stockValue": null,
+      "batchNote": "虚构配码，仅演示现货不足时的建议；尺码对应不用于真实采购。"
+    },
+    {
+      "sku": "DEMO-ALPHA-Blue-7", "style": "DEMO-ALPHA", "styleLabel": "示例 A · 演示便鞋",
+      "color": "Blue", "colorLabel": "蓝色", "size": "7", "cnSize": "37", "sizeOrder": 2,
+      "n7": 2, "p7": 1, "n14": 3, "n28": 6, "fbm7": 0,
+      "inventoryKnown": true, "orderMultiple": 2, "minimumOrder": 24, "cartonQuantity": 12,
+      "inventory": {"afn_fulfillable_quantity": 9, "afn_reserved_quantity": 2, "reserved_customerorders": 0, "reserved_fc_processing": 1, "reserved_fc_transfers": 1, "afn_inbound_receiving_quantity": 2, "afn_inbound_shipped_quantity": 6, "afn_inbound_working_quantity": 0},
+      "baseline": null, "baselineDate": null, "baselineKind": null, "currentSold": null, "stockValue": null,
+      "batchNote": "虚构配码，演示在途及仓内货与可售分列。"
+    },
+    {
+      "sku": "DEMO-ALPHA-Green-6", "style": "DEMO-ALPHA", "styleLabel": "示例 A · 演示便鞋",
+      "color": "Green", "colorLabel": "绿色", "size": "6", "cnSize": "36", "sizeOrder": 1,
+      "n7": 1, "p7": 1, "n14": 2, "n28": 3, "fbm7": 0,
+      "inventoryKnown": true, "orderMultiple": 2, "minimumOrder": 24, "cartonQuantity": 12,
+      "inventory": {"afn_fulfillable_quantity": 16, "afn_reserved_quantity": 0, "reserved_customerorders": 0, "reserved_fc_processing": 0, "reserved_fc_transfers": 0, "afn_inbound_receiving_quantity": 0, "afn_inbound_shipped_quantity": 0, "afn_inbound_working_quantity": 0},
+      "baseline": null, "baselineDate": null, "baselineKind": null, "currentSold": null, "stockValue": null,
+      "batchNote": "虚构配码，演示已有货足够时暂不补。"
+    },
+    {
+      "sku": "DEMO-ALPHA-Green-7", "style": "DEMO-ALPHA", "styleLabel": "示例 A · 演示便鞋",
+      "color": "Green", "colorLabel": "绿色", "size": "7", "cnSize": "37", "sizeOrder": 2,
+      "n7": 0, "p7": 0, "n14": 0, "n28": 0, "fbm7": 0,
+      "inventoryKnown": true, "orderMultiple": 2, "minimumOrder": 24, "cartonQuantity": 12,
+      "inventory": {"afn_fulfillable_quantity": 4, "afn_reserved_quantity": 0, "reserved_customerorders": 0, "reserved_fc_processing": 0, "reserved_fc_transfers": 0, "afn_inbound_receiving_quantity": 0, "afn_inbound_shipped_quantity": 0, "afn_inbound_working_quantity": 0},
+      "baseline": null, "baselineDate": null, "baselineKind": null, "currentSold": null, "stockValue": null,
+      "batchNote": "虚构配码，演示近期销量为零时保留观察。"
+    },
+    {
+      "sku": "DEMO-BETA-White-6", "style": "DEMO-BETA", "styleLabel": "示例 B · 演示短靴",
+      "color": "White", "colorLabel": "白色", "size": "6", "cnSize": "36", "sizeOrder": 1,
+      "n7": 2, "p7": 1, "n14": 3, "n28": 4, "fbm7": 1,
+      "inventoryKnown": true,
+      "inventory": {"afn_fulfillable_quantity": 2, "afn_reserved_quantity": 0, "reserved_customerorders": 0, "reserved_fc_processing": 0, "reserved_fc_transfers": 0, "afn_inbound_receiving_quantity": 0, "afn_inbound_shipped_quantity": 0, "afn_inbound_working_quantity": 0},
+      "baseline": null, "baselineDate": null, "baselineKind": null, "currentSold": null, "stockValue": null,
+      "batchNote": "虚构配码，不限制单码建议倍数。"
+    },
+    {
+      "sku": "DEMO-BETA-White-7", "style": "DEMO-BETA", "styleLabel": "示例 B · 演示短靴",
+      "color": "White", "colorLabel": "白色", "size": "7", "cnSize": "37", "sizeOrder": 2,
+      "n7": null, "p7": null, "n14": null, "n28": null, "fbm7": null,
+      "inventoryKnown": false,
+      "inventory": {"afn_fulfillable_quantity": null, "afn_reserved_quantity": null, "reserved_customerorders": null, "reserved_fc_processing": null, "reserved_fc_transfers": null, "afn_inbound_receiving_quantity": null, "afn_inbound_shipped_quantity": null, "afn_inbound_working_quantity": null},
+      "baseline": null, "baselineDate": null, "baselineKind": null, "currentSold": null, "stockValue": null,
+      "batchNote": "虚构配码，演示未知库存和销量保留为空。"
+    },
+    {
+      "sku": "DEMO-BETA-Black-6", "style": "DEMO-BETA", "styleLabel": "示例 B · 演示短靴",
+      "color": "Black", "colorLabel": "黑色", "size": "6", "cnSize": "36", "sizeOrder": 1,
+      "n7": 0, "p7": 0, "n14": 0, "n28": 0, "fbm7": 0,
+      "inventoryKnown": true, "intendedChannel": "FBA", "supplyStage": "planned",
+      "inventory": {"afn_fulfillable_quantity": 0, "afn_reserved_quantity": 0, "reserved_customerorders": 0, "reserved_fc_processing": 0, "reserved_fc_transfers": 0, "afn_inbound_receiving_quantity": 0, "afn_inbound_shipped_quantity": 0, "afn_inbound_working_quantity": 0},
+      "baseline": null, "baselineDate": null, "baselineKind": null, "currentSold": null, "stockValue": null,
+      "batchNote": "虚构配码，演示计划首发，尚无采购或在途。"
+    },
+    {
+      "sku": "DEMO-BETA-Black-7", "style": "DEMO-BETA", "styleLabel": "示例 B · 演示短靴",
+      "color": "Black", "colorLabel": "黑色", "size": "7", "cnSize": "37", "sizeOrder": 2,
+      "n7": 1, "p7": 0, "n14": 1, "n28": 2, "fbm7": 2,
+      "inventoryKnown": true, "fbaReplenishmentMode": "fbm_only",
+      "inventory": {"afn_fulfillable_quantity": 0, "afn_reserved_quantity": 0, "reserved_customerorders": 0, "reserved_fc_processing": 0, "reserved_fc_transfers": 0, "afn_inbound_receiving_quantity": 0, "afn_inbound_shipped_quantity": 0, "afn_inbound_working_quantity": 0},
+      "baseline": null, "baselineDate": null, "baselineKind": null, "currentSold": null, "stockValue": null,
+      "batchNote": "虚构配码，演示明确改为FBM后本轮不自动补FBA。"
+    }
+  ]
+}

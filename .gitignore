@@ -1,0 +1,33 @@
+# Business records are intentionally local.
+data/
+.qa/
+imports/
+backups/
+product-images/
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.xls
+*.xlsx
+*.xlsm
+*.csv
+*.log
+runtime.json
+.env
+.env.*
+!.env.example
+*credential*
+*secret*
+*token*
+# Legacy prototypes may contain embedded business snapshots.
+prototype-data.json
+prototype-*.html
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+.DS_Store
+Thumbs.db

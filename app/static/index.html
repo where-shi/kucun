@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>鞋款补货 · 本地工作台</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-icon" aria-hidden="true">补</span><div><strong>鞋款补货</strong><span class="subtitle">本地补货工作台</span></div><span id="connection" class="tag">正在连接</span></div>
+    <div class="top-actions"><span id="save-state" class="muted" aria-live="polite"></span><button type="button" data-action="refresh">刷新本地数据</button><button type="button" data-action="feedback">页面意见</button></div>
+  </header>
+  <div id="source-time" class="source-time"></div>
+  <nav id="navigation" class="nav" aria-label="主导航"></nav>
+  <div id="notice" role="status" aria-live="polite" hidden></div>
+  <div id="error" role="alert" hidden></div>
+  <main id="app"><div class="empty">正在读取本地保存的数据…</div></main>
+  <footer class="footer"><span>建议 → 你修改 → 保存草稿 → 确认已采购 → 跟踪到货</span><span>按颜色、尺码保存 · 保留手改与修改记录</span></footer>
+  <dialog id="modal"><div id="modal-content"></div></dialog>
+  <noscript>请在浏览器中启用 JavaScript 后使用本地工作台。</noscript>
+</body>
+</html>
