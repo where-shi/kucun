@@ -22,7 +22,10 @@ def build_parser():
     recommend = subs.add_parser("recommend", parents=[common])
     recommend.add_argument("--style")
     recommend.add_argument("--days", type=int, default=35)
-    for name in ("new-plan", "update-plan", "adopt", "confirm", "shipment", "receipt", "reconcile", "cancel-purchase", "match-shipment", "cycle", "feedback", "historical-batch", "planning-settings", "style-preference"):
+    inbound = subs.add_parser("auto-match-inbound", parents=[common])
+    inbound.add_argument("--before-snapshot", required=True)
+    inbound.add_argument("--after-snapshot", required=True)
+    for name in ("new-plan", "update-plan", "adopt", "confirm", "shipment", "receipt", "reconcile", "cancel-purchase", "match-shipment", "purchase-logistics", "cycle", "feedback", "historical-batch", "planning-settings", "style-preference"):
         command = subs.add_parser(name, parents=[common])
         command.add_argument("--json-file", type=Path, help="UTF-8 JSON请求文件；也可用--json")
         command.add_argument("--json", help="JSON请求内容")
@@ -30,6 +33,8 @@ def build_parser():
             command.add_argument("id", help="方案ID、采购ID或SKU")
     imp = subs.add_parser("import", parents=[common])
     imp.add_argument("--json-file", type=Path, required=True)
+    returns_import = subs.add_parser("import-returns", parents=[common])
+    returns_import.add_argument("--json-file", type=Path, required=True)
     exp = subs.add_parser("export", parents=[common])
     exp.add_argument("id")
     exp.add_argument("--output", type=Path, required=True)
@@ -66,6 +71,8 @@ def main(argv=None):
             result = store.bootstrap()
         elif command == "recommend":
             result = store.recommend(args.style, args.days)
+        elif command == "auto-match-inbound":
+            result = store.auto_match_inbound(args.before_snapshot, args.after_snapshot)
         elif command == "audit":
             result = store.audit()
         elif command == "backup":
@@ -73,6 +80,9 @@ def main(argv=None):
         elif command == "import":
             document = json.loads(args.json_file.read_text(encoding="utf-8-sig"))
             result = store.import_snapshot(document.get("document", document))
+        elif command == "import-returns":
+            document = json.loads(args.json_file.read_text(encoding="utf-8-sig"))
+            result = store.import_returns(document.get("document", document))
         elif command == "export":
             if args.output.exists():
                 raise AppError("导出文件已存在，请换一个文件名")
@@ -100,6 +110,8 @@ def main(argv=None):
                 result = store.cancel_purchase(args.id, payload)
             elif command == "match-shipment":
                 result = store.match_lingxing_shipment(args.id, payload)
+            elif command == "purchase-logistics":
+                result = store.update_purchase_logistics(args.id, payload)
             elif command == "cycle":
                 result = store.update_cycle(args.id, payload)
             elif command == "style-preference":

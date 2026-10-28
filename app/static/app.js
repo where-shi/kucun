@@ -12,8 +12,11 @@ function sizeHeader(items,size) {
   return `<span class="size-us">美码 US ${esc(size)}</span><small class="size-cn">中国码 ${esc(values.length===1?values[0]:"待确认")}</small>`;
 }
 const sum = (items, field) => items.reduce((n, item) => n + (number(item[field]) ? item[field] : 0), 0);
-const labels = {today:"今日提醒",matrix:"按尺码补货",plans:"全部方案与货款",purchases:"采购与到货",sales:"销量与本轮",data:"数据与记录"};
+const labels = {today:"今日提醒",matrix:"按尺码补货",plans:"全部方案与货款",purchases:"采购与到货",sales:"销量与本轮",returns:"退货分析",data:"数据与记录"};
 const state = {data:null,page:"matrix",style:null,days:35,view:"stock",sku:null,planId:null,purchaseId:null,purchaseBatchId:"all",edits:{},priceEdits:{},tierPriceEdits:{},invalid:{},dayEdits:{},rec:null,recKey:"",search:"",busy:false,audit:[],eventId:null,noticeTimer:null,saved:false};
+const matrixSelection = {skus:new Set(),context:"",quantity:""};
+const returnState = {days:28,style:null,sku:null,search:"",cache:{},loading:false,error:"",requestId:0};
+let matrixGesture=null, suppressMatrixClick=false;
 const rows = () => (state.data?.rows || []);
 const styleRows = () => rows().filter(row => row.style === state.style);
 const styles = () => [...new Map(rows().map(row => [row.style,{id:row.style,label:row.styleLabel}])).values()].sort((a,b)=>Number(seasonalHold(a.id))-Number(seasonalHold(b.id)));
@@ -37,6 +40,57 @@ function pickPurchasedSku() {
 const editable = () => !plan() || plan().status==="draft";
 const editKey = () => state.planId || "new:"+state.style;
 const edits = () => state.edits[editKey()] || (state.edits[editKey()]={});
+const canBatchFill = () => editable() && ["matrix","plans"].includes(state.page) && !(state.page==="matrix"&&state.view==="purchased");
+function clearMatrixSelection(update=true) {
+  matrixSelection.skus.clear();matrixSelection.quantity="";
+  if(update)updateMatrixSelection();
+}
+function syncMatrixSelectionContext() {
+  const context=`${state.page}:${state.style}:${editKey()}`;
+  if(matrixSelection.context!==context||!canBatchFill())clearMatrixSelection(false);
+  matrixSelection.context=context;
+  const available=new Set(styleRows().map(row=>row.sku));
+  matrixSelection.skus.forEach(sku=>{if(!available.has(sku))matrixSelection.skus.delete(sku);});
+}
+function renderBatchFill() {
+  if(!canBatchFill())return "";
+  const count=matrixSelection.skus.size;
+  return `<section class="matrix-batch-fill" aria-label="多选尺码统一填写"><p class="matrix-batch-hint">多选：按住 Ctrl（Mac 用 ⌘）点格子，或按住鼠标左键拖选一片；Ctrl + 拖动可追加。紫色勾选表示已选，Esc 清除。</p><div class="matrix-batch-controls"><span class="matrix-batch-count" role="status" aria-live="polite">已选 <strong data-matrix-selection-count>${count}</strong> 个尺码</span><label>每个尺码填<input type="number" min="0" max="1000000" step="1" inputmode="numeric" data-batch-quantity value="${esc(matrixSelection.quantity)}" placeholder="双数" ${count?"":"disabled"}></label><span>双</span><button type="button" class="small" data-action="apply-batch-quantity" ${count?"":"disabled"}>应用到草稿</button><button type="button" class="quiet small" data-action="clear-matrix-selection" ${count?"":"disabled"}>清除选择</button></div><p class="matrix-batch-note">只改选中的尺码，每码填相同双数；填 0 的格子显示未填写。填好后点“保存我的数量”。</p><p class="matrix-batch-error" data-batch-error role="alert" hidden></p></section>`;
+}
+function updateMatrixSelection() {
+  const count=matrixSelection.skus.size;
+  if(!count)matrixSelection.quantity="";
+  document.querySelectorAll(".matrix [data-sku]").forEach(button=>{
+    const selected=matrixSelection.skus.has(button.dataset.sku);
+    button.classList.toggle("batch-selected",selected);
+    button.setAttribute("aria-pressed",String(count?selected:state.sku===button.dataset.sku));
+  });
+  document.querySelectorAll("[data-matrix-selection-count]").forEach(element=>element.textContent=count);
+  document.querySelectorAll('[data-batch-quantity],[data-action="apply-batch-quantity"],[data-action="clear-matrix-selection"]').forEach(element=>element.disabled=!count);
+  const input=$("[data-batch-quantity]");
+  if(input&&!count){input.value="";input.setCustomValidity("");}
+  const error=$("[data-batch-error]");if(error){error.hidden=true;error.textContent="";}
+}
+function applyBatchQuantity() {
+  if(state.busy||$("#modal").open||!canBatchFill()||!matrixSelection.skus.size)return;
+  const input=$("[data-batch-quantity]");if(!input)return;
+  const value=input.value.trim(),quantity=Number(value);
+  if(value===""||!Number.isSafeInteger(quantity)||quantity<0||quantity>1000000||input.validity.badInput){
+    const message="请输入 0 至 1000000 的整数；不补请填 0，不能留空。";
+    input.setCustomValidity(message);input.reportValidity();input.focus();
+    const error=$("[data-batch-error]");if(error){error.textContent=message;error.hidden=false;}
+    return;
+  }
+  input.setCustomValidity("");
+  const valid=new Set(styleRows().map(row=>row.sku));let count=0;
+  for(const sku of matrixSelection.skus){
+    if(!valid.has(sku))continue;
+    edits()[sku]={quantity,manual:true,note:chosen(sku)?.note || ""};
+    delete (state.invalid[editKey()] || {})[sku];count++;
+  }
+  matrixSelection.quantity=value;render();
+  notify(`已为 ${count} 个尺码各填 ${quantity} 双。点“保存我的数量”保存草稿。`);
+}
 const dirty = () => Object.keys(state.priceEdits).length>0 || Object.keys(state.tierPriceEdits).length>0 || Object.values(state.edits).some(value => Object.keys(value).length) || Object.values(state.invalid).some(value=>Object.keys(value).length) || Object.entries(state.dayEdits).some(([key,value])=>!key.startsWith("new:")&&state.data?.plans?.find(item=>item.id===key)?.target_days!==value);
 const styleRec = () => state.recKey===`${state.style}:${state.days}` ? state.rec : null;
 const resultFor = sku => {
@@ -112,6 +166,11 @@ function productImage(style,className="product-thumb") {
   const path=productImagePath(style);
   return `<span class="${className}">${path?`<img src="${esc(path)}" alt="${esc(styleName(style))} 款式识别图" loading="lazy" decoding="async" data-product-image><span class="image-fallback" hidden>图片暂无法显示</span>`:'<span class="image-fallback">图片<br>待关联</span>'}</span>`;
 }
+function colorHeading(style,color,label,stage="") {
+  const path=stylePreference(style).color_images?.[color]?.path;
+  const valid=typeof path==="string"&&/^\/product-images\/[^?#\\\u0000-\u0020]+$/.test(path);
+  return `<span class="color-heading">${valid?`<img class="color-thumb" src="${esc(path)}" alt="${esc(label)}商品图" loading="lazy" decoding="async">`:""}<span>${esc(label)}${stage}</span></span>`;
+}
 function chosen(sku) {
   if(Object.hasOwn(edits(),sku)) return edits()[sku];
   const line=plan()?.lines?.find(line=>line.sku===sku);
@@ -125,11 +184,11 @@ function updatePlanGrid(sku,value,valid=true) {
   const row=rows().find(item=>item.sku===sku);if(!row)return;
   document.querySelectorAll("[data-plan-cell]").forEach(cell=>{
     if(cell.dataset.planCell!==sku)return;
-    cell.textContent=valid?String(value):"未填";
+    cell.textContent=valid?(value===0?"—":String(value)):"未填";
     const button=cell.closest("button");button.classList.toggle("plan-filled",valid&&value>0);
-    button.setAttribute("aria-label",`${row.colorLabel} ${sizeLabel(row)} ${valid?value:"未填"} ${valid?"我已填写":"请填完整"}`);
+    button.setAttribute("aria-label",`${row.colorLabel} ${sizeLabel(row)} ${valid?(value===0?"未填写":value):"未填"} ${valid?(value===0?"未填写":"我已填写"):"请填完整"}`);
   });
-  document.querySelectorAll("[data-plan-cell-state]").forEach(cell=>{if(cell.dataset.planCellState===sku)cell.textContent=valid?"我已填写":"请填完整";});
+  document.querySelectorAll("[data-plan-cell-state]").forEach(cell=>{if(cell.dataset.planCellState===sku)cell.textContent=valid?(value===0?"未填写":"我已填写"):"请填完整";});
 }
 function mergedLines() {
   const found=new Map((plan()?.lines || []).map(line=>[line.sku,{...line}]));
@@ -182,6 +241,7 @@ function pickDefaultPlan() {
 }
 async function bootstrap(initial=false) {
   state.data=await api("/api/bootstrap");
+  returnState.cache={};returnState.requestId++;returnState.loading=false;returnState.error="";
   if(!state.data.rows?.length)throw new Error("当前没有可用的商品资料。请检查本地来源文件。");
   if(!styles().some(item=>item.id===state.style))state.style=styles()[0].id;
   if(initial)pickDefaultPlan();
@@ -191,6 +251,7 @@ async function bootstrap(initial=false) {
   $("#source-time").textContent=`销量截至美西 ${md.salesEnd || "待核"} · 库存快照：${md.inventoryCapturedLocal || "待核"} · 刷新本地数据只读取已保存资料`;
   await loadRecommendations();
   render();
+  if(state.page==="returns")await loadReturns();
 }
 async function loadRecommendations() {
   const key=`${state.style}:${state.days}`;
@@ -211,10 +272,11 @@ async function changeDays(days) {
 }
 function render() {
   if(!state.data)return;
+  finishMatrixGesture();syncMatrixSelectionContext();
   const navButton=key=>`<button type="button" data-page="${key}" class="${state.page===key?"active":""}" ${state.page===key?'aria-current="page"':""}>${labels[key]}</button>`;
   const secondary=["plans","purchases","data"];
-  $("#navigation").innerHTML=["matrix","sales"].map(navButton).join("")+`<details class="nav-more ${secondary.includes(state.page)?"active":""}"><summary>${secondary.includes(state.page)?`更多 · ${labels[state.page]}`:"更多"}</summary><div class="nav-more-items">${secondary.map(navButton).join("")}</div></details>`;
-  const views={today:renderToday,matrix:renderMatrix,plans:renderPlans,purchases:renderPurchases,sales:renderSales,data:renderData};
+  $("#navigation").innerHTML=["matrix","sales","returns"].map(navButton).join("")+`<details class="nav-more ${secondary.includes(state.page)?"active":""}"><summary>${secondary.includes(state.page)?`更多 · ${labels[state.page]}`:"更多"}</summary><div class="nav-more-items">${secondary.map(navButton).join("")}</div></details>`;
+  const views={today:renderToday,matrix:renderMatrix,plans:renderPlans,purchases:renderPurchases,sales:renderSales,returns:renderReturns,data:renderData};
   $("#app").innerHTML=views[state.page]();updateSaveState();
 }
 function selectStyleHTML() {
@@ -227,7 +289,6 @@ function renderMatrix() {
   const hold=seasonalHold();const rawRec=styleRec();const rec=hold&&rawRec?{...rawRec,quantity:0,suggestedCount:0}:rawRec;const selected=plan();
   const purchasedView=state.view==="purchased";
   return `${renderWorkReminders()}<div class="workspace decision-workspace">${sidebar()}<section><div class="panel">
-    ${purchasedView?"":'<div class="instructions"><span><b>1</b>选款看建议</span><span><b>2</b>采用建议再修改</span><span><b>3</b>保存补货草稿</span></div>'}
     <div class="heading"><div class="product-heading">${productImagePath()?`<button class="image-preview-button" data-action="preview-image" aria-label="查看 ${esc(styleName(state.style))} 商品大图">${productImage(state.style)}<span>看大图</span></button>`:productImage(state.style)}<div><h1>${esc(styleName(state.style))}</h1><span class="muted">${styleRows().length} 个颜色尺码 · FBA 补货参考</span></div></div><span class="${hold?"season-tag":"tag"}">${purchasedView?"已采购 · 跟进进度":hold?"春夏再看":"建议先填，你来决定"}</span></div>
     ${purchasedView?"":styleArrivalSummary()+historicalSummary()+variantSupplySummary()}
     ${purchasedView?"":`<div class="controls"><span class="muted">新货到仓后，想再卖多少天</span>${[30,35,40].map(days=>`<button type="button" data-days="${days}" class="${state.days===days?"active":""}" ${!editable()?"disabled":""}>${days} 天</button>`).join("")}</div>`}
@@ -236,12 +297,12 @@ function renderMatrix() {
     ${["recommend","plan"].includes(state.view)?`<div class="decision-actions"><button type="button" class="primary" data-action="adopt" ${!editable()||!rec||hold||firstShipmentOnly()?"disabled":""}>${firstShipmentOnly()?"首发请逐码填写":"一键带入建议"}</button><button type="button" data-action="save-plan" ${!editable()?"disabled":""}>保存我的数量</button>${editable()?'<button type="button" class="primary" data-action="confirm-purchase">我已采购，确认数量</button>':`<span class="tag">本方案${planStatus(selected)}</span>`}<span class="muted">本次已填 <strong data-draft-total>${sum(mergedLines(),"quantity")}</strong> 双 · ${editable()?"保存是草稿；采购完成后再点确认":selected?.status==="cancelled"?"本方案已取消登记":"已按此数量登记采购"}</span></div>`:""}
     <div class="controls"><span class="muted">格子看什么</span>${[["recommend","建议补货"],["plan","补货方案"],["purchased","已采购"],["stock","FBA 可售"],["inbound","已发在途"],["coverage","现货天数"],["sales","近 7 天销量"]].map(([value,label])=>`<button type="button" class="small ${state.view===value?"active":""}" data-view="${value}">${label}</button>`).join("")}</div>
     ${purchasedView?renderPurchasedOverview():""}
-    ${state.view==="plan"?`<p class="plan-matrix-note"><strong>${selected?esc(selected.name):"本款补货草稿"}</strong> · 格子显示你这次填写的双数；<strong>— 是未填写，0 是明确不补</strong>。点格子即可在上方修改，保存后可下次继续。</p>`:""}
-    ${purchasedView?'<p class="matrix-explainer">大数字是当前跟进批次的<strong>已采购双数</strong>，下方显示已购未发、部分发货或到仓进度。点格子看该码的采购明细；— 表示没有正在跟进的采购。</p>':'<p class="matrix-explainer"><span class="recommend-outline-key"></span><strong>蓝框 / “补”标记：建议追加的尺码</strong>。点一个格子，上方就显示库存、在途、补货原因和数量输入框。</p>'}
+    ${state.view==="plan"?`<p class="plan-matrix-note"><strong>${selected?esc(selected.name):"本款补货草稿"}</strong></p>`:""}
     ${state.view==="inbound"?'<p class="matrix-explainer">格子只显示实际有数量的状态，例如<strong>调仓中 3 双</strong>；同一码分在几个状态时分别列出，0不重复写。状态待核会明确标出，采购和历史批次不另加进来。</p>':""}
     ${renderDetail()}
+    ${renderBatchFill()}
     ${purchasedView||state.view==="inbound"||rec?matrixTable():'<div class="empty">正在计算这款的建议…</div>'}
-    <p class="muted">${purchasedView?"这里只跟进已采购批次，不把采购双数另加到FBA可售或系统在途；领星核实整批发出后移入历史，不重复计入待发采购。":"深蓝外圈表示当前选中。格子中的数字按上方所选视图显示；补货建议和本次填写量分开，保存仍是草稿。"}</p>
+    ${purchasedView?'<p class="muted">领星核实整批发出后移入历史，不重复计入待发采购。</p>':""}
   </div>${purchasedView?"":renderPlanSummary()}</section></div>`;
 }
 function renderPlanSummary() {
@@ -260,11 +321,11 @@ function renderPurchasedOverview() {
   const ordered=sum(lines,"ordered"),shipped=sum(lines,"shipped"),received=sum(lines,"received");
   const history=allStylePurchases().filter(item=>!currentPurchase(item));
   const actions=`<div class="controls"><label>查看采购批次<select id="purchase-batch-filter"><option value="all">全部待发采购 · ${active.length} 批</option>${active.map(item=>`<option value="${esc(item.id)}" ${item.id===state.purchaseBatchId?"selected":""}>${esc(batchName(item))} · ${sum(item.lines,"ordered")} 双</option>`).join("")}</select></label><button type="button" data-action="new-purchase-batch">再来一批采购</button></div>`;
-  const batchCards=batches.map(item=>`<div class="purchased-batch"><div class="heading"><div><strong>${esc(batchName(item))}</strong><p>已购 ${sum(item.lines,"ordered")} 双 · 领星已核实发出 ${item.lines.reduce((n,line)=>n+(line.system_shipped || 0),0)} 双</p></div><button type="button" class="small" data-cancel-purchase="${esc(item.id)}">取消这批采购登记</button></div><p class="muted">${item.shipment_matches?.length?"已匹配领星货件："+esc([...new Set(item.shipment_matches.map(m=>m.shipment_id))].join("、")):"等待领星逐批核实发货；原有在途不抵扣本批采购。"}</p></div>`).join("");
-  const past=history.length?`<details class="purchase-history"><summary>已发货 / 已取消历史（${history.length} 批）</summary>${history.map(item=>`<div class="purchased-batch"><strong>${esc(batchName(item))}</strong><p>${esc(purchaseLabel(item))} · ${sum(item.lines,"ordered")} 双</p>${item.cancel_note?`<p class="muted">${esc(item.cancel_note)}</p>`:""}${(item.shipment_matches || []).map(m=>`<p class="muted">领星货件 ${esc(m.shipment_id)} · 已核实 ${sum(m.lines,"quantity")} 双</p>`).join("")}</div>`).join("")}</details>`:"";
-  if(!batches.length)return `${actions}<div class="callout"><strong>这款暂无正在跟进的采购</strong><p>保存补货方案仍是草稿，实际下单后才会显示在这里。</p></div>${past}`;
+  const batchCards=batches.map(item=>`<div class="purchased-batch"><div class="heading"><div><strong>${esc(batchName(item))}</strong><p>已购 ${sum(item.lines,"ordered")} 双 · 领星已核实发出 ${item.lines.reduce((n,line)=>n+(line.system_shipped || 0),0)} 双</p></div><button type="button" class="small" data-cancel-purchase="${esc(item.id)}">取消这批采购登记</button></div><p><span class="tag ${item.forwarder_handoff_confirmed?"amber":""}">${esc(purchaseLabel(item))}</span> · ${esc(shipmentTimingText(item))}</p>${item.forwarder_note?`<p class="muted">${esc(item.forwarder_note)}</p>`:""}<p class="muted">${item.shipment_matches?.length?"已匹配领星货件："+esc([...new Set(item.shipment_matches.map(m=>m.shipment_id))].join("、")):"等待领星逐批核实发货；原有在途不抵扣本批采购。"}</p>${timingDetails(item)}</div>`).join("");
+  const past=history.length?`<details class="purchase-history"><summary>已发货 / 已取消历史（${history.length} 批）</summary>${history.map(item=>`<div class="purchased-batch"><strong>${esc(batchName(item))}</strong><p>${esc(purchaseLabel(item))} · ${sum(item.lines,"ordered")} 双</p>${item.cancel_note?`<p class="muted">${esc(item.cancel_note)}</p>`:""}${(item.shipment_matches || []).map(m=>`<p class="muted">领星货件 ${esc(m.shipment_id)} · 已核实 ${sum(m.lines,"quantity")} 双</p>`).join("")}${(item.inbound_matches || []).map(m=>`<p class="muted">领星 ${esc(m.first_observed_date)} 显示在途，配码相符 ${sum(m.lines,"quantity")} 双${timingFor(item).expected_available_date?`；预计 ${esc(shortDate(timingFor(item).expected_available_date))} 左右到仓（估算）`:""}。</p>`).join("")}</div>`).join("")}</details>`:"";
+  if(!batches.length)return `${actions}<div class="callout"><strong>这款暂无待发采购</strong><p>${history.some(item=>item.shipment_archived_at)?'已发出的采购可在下方历史查看；在途数量看“已发在途”。':'保存补货方案仍是草稿，实际下单后才会显示在这里。'}</p></div>${past}`;
   const facts=[["已采购",ordered],["已购未发",ordered-shipped],["已发未到",shipped-received],["已到仓",received]];
-  return `${actions}<div class="purchased-overview"><h2>已采购 ${ordered} 双 · ${batches.length} 批</h2><div class="metrics">${facts.map(([label,value])=>`<div class="metric"><span>${label}</span><strong>${value}<small> 双</small></strong></div>`).join("")}</div><p class="muted">以领星具体货件核实本批发货；整批核实发出后移入历史，系统在途继续在“已发在途”查看。</p>${batchCards}</div>${past}`;
+  return `${actions}<div class="purchased-overview"><h2>已采购 ${ordered} 双 · ${batches.length} 批</h2><div class="metrics">${facts.map(([label,value])=>`<div class="metric"><span>${label}</span><strong>${value}<small> 双</small></strong></div>`).join("")}</div><p class="muted">以领星已发在途与采购配码核对；整批匹配后移入历史，系统在途继续在“已发在途”查看。</p>${batchCards}</div>${past}`;
 }
 function renderPurchasedDetail(row) {
   const facts=purchasedForSku(row.sku);
@@ -306,8 +367,9 @@ function variantSupplySummary() {
 function matrixTable(view=state.view) {
   const items=styleRows();const colors=[...new Map(items.map(row=>[row.color,row.colorLabel])).entries()];
   const sizes=[...new Set([...items].sort(compareSizes).map(row=>row.size))];
-  return `<div class="table-wrap"><table class="matrix ${view==="inbound"?"matrix-inbound":""}"><thead><tr><th>颜色 / 尺码</th>${sizes.map(size=>`<th scope="col">${sizeHeader(items,size)}</th>`).join("")}</tr></thead><tbody>${colors.map(([color,label])=>{const staged=items.find(row=>row.color===color&&row.supplyStage);return `<tr><th>${esc(label)}${staged?`<small class="variant-stage">${esc(staged.colorSupplyLabel || (staged.supplyStage==="planned"?"计划发 · 未发出":"已发 · 未到仓"))}</small>`:""}</th>${sizes.map(size=>{
-    const row=items.find(item=>item.color===color&&item.size===size);if(!row)return '<td class="dash">—</td>';
+  return `<div class="table-wrap"><table class="matrix ${view==="inbound"?"matrix-inbound":""}" ${canBatchFill()?'data-matrix-selectable="true"':""}><thead><tr><th>颜色 / 尺码</th>${sizes.map(size=>`<th scope="col">${sizeHeader(items,size)}</th>`).join("")}</tr></thead><tbody>${colors.map(([color,label],rowIndex)=>{const staged=items.find(row=>row.color===color&&row.supplyStage);return `<tr><th>${colorHeading(state.style,color,label,staged?`<small class="variant-stage">${esc(staged.colorSupplyLabel || (staged.supplyStage==="planned"?"计划发 · 未发出":"已发 · 未到仓"))}</small>`:"")}</th>${sizes.map((size,columnIndex)=>{
+    const cellCoordinates=`data-matrix-row="${rowIndex}" data-matrix-col="${columnIndex}"`;
+    const row=items.find(item=>item.color===color&&item.size===size);if(!row)return `<td class="dash" ${cellCoordinates}>—</td>`;
     const result=resultFor(row.sku) || (["purchased","inbound"].includes(view)?{quantity:null,label:view==="purchased"?"已采购":"库存状态",status:"inventory"}:null);if(!result)return '<td>…</td>';
     const flow=view==="inbound"?inboundFacts(row):null;
     let main=number(result.quantity)?result.quantity:result.label;let small=result.status==="suggest"?"建议补货":result.label;
@@ -315,13 +377,14 @@ function matrixTable(view=state.view) {
     if(view==="inbound"){main=flow.active[0]?.quantity ?? (flow.unknown.length?"待核":0);small=flow.active[0]?.label || (flow.unknown.length?"状态未取全":"暂无在途／仓内货");}
     if(view==="sales"){main=show(row.n7);small="FBA 普通销量";}
     if(view==="coverage"){main=number(result.daily)&&result.daily>0&&number(row.inventory?.afn_fulfillable_quantity)?(row.inventory.afn_fulfillable_quantity/result.daily).toFixed(1):"待评估";small="天 · 当前现货";}
-    if(view==="plan"){const entry=chosen(row.sku);const invalid=Object.hasOwn(state.invalid[editKey()] || {},row.sku);main=invalid?"未填":entry?entry.quantity:"—";small=invalid?"请填完整":entry?(entry.manual?"我已填写":"已带入建议"):"未填写";}
-    if(view==="purchased"){const facts=purchasedForSku(row.sku);main=facts.ordered || "—";small=!facts.ordered?"未采购":facts.received===facts.ordered?"已到齐 · 待核库存":facts.received>0?`已到 ${facts.received} / ${facts.ordered}`:facts.shipped===facts.ordered?"已发货":facts.shipped>0?`已发 ${facts.shipped} / ${facts.ordered}`:"已购未发";}
+    if(view==="plan"){const entry=chosen(row.sku);const invalid=Object.hasOwn(state.invalid[editKey()] || {},row.sku);const empty=!entry||entry.quantity===0;main=invalid?"未填":empty?"—":entry.quantity;small=invalid?"请填完整":empty?"未填写":entry.manual?"我已填写":"已带入建议";}
+    if(view==="purchased"){const facts=purchasedForSku(row.sku);main=facts.ordered || "—";small=!facts.ordered?"未采购":facts.received===facts.ordered?"已到齐 · 待核库存":facts.received>0?`已到 ${facts.received} / ${facts.ordered}`:facts.shipped===facts.ordered?"已发货":facts.shipped>0?`已发 ${facts.shipped} / ${facts.ordered}`:facts.batches.every(({item})=>item.forwarder_handoff_confirmed)?"已交货代 · 待发":"已购未发";}
     const receiving=view==="inbound"?flow.active.slice(1).map(item=>`<small class="flow-state">${item.label} <b>${item.quantity}</b></small>`).join("")+flow.unknown.map(item=>`<small class="flow-state">${item.label}待核</small>`).join(""):"";
     const extraLabel=view==="inbound"?flow.active.slice(1).map(item=>`，${item.label} ${item.quantity} 双`).join("")+flow.unknown.map(item=>`，${item.label}待核`).join(""):"";
     const recommended=view!=="purchased"&&result.status==="suggest"&&number(result.quantity)&&result.quantity>0;
     const adviceLabel=view==="purchased"?"":recommended?`，建议补 ${result.quantity} 双`:`，${result.label}`;
-    return `<td><button type="button" class="neutral ${["plan","purchased"].includes(view)&&number(main)&&main>0?"plan-filled":""} ${recommended?"recommend-outline":""} ${state.sku===row.sku?"selected":""}" data-sku="${esc(row.sku)}" aria-pressed="${state.sku===row.sku}" aria-controls="sku-advice" aria-label="${esc(`${label} ${sizeLabel(row)} ${main} ${small}${extraLabel}${adviceLabel}`)}">${recommended?'<span class="matrix-rec-marker" aria-hidden="true">补</span>':""}<span ${view==="plan"?`data-plan-cell="${esc(row.sku)}"`:""}>${esc(main)}</span><small ${view==="plan"?`data-plan-cell-state="${esc(row.sku)}"`:""}>${esc(small)}</small>${receiving}</button></td>`;
+    const batchSelected=matrixSelection.skus.has(row.sku);
+    return `<td ${cellCoordinates}><button type="button" draggable="false" class="neutral ${["plan","purchased"].includes(view)&&number(main)&&main>0?"plan-filled":""} ${recommended?"recommend-outline":""} ${state.sku===row.sku?"selected":""} ${batchSelected?"batch-selected":""}" data-sku="${esc(row.sku)}" aria-pressed="${matrixSelection.skus.size?batchSelected:state.sku===row.sku}" aria-controls="sku-advice" aria-label="${esc(`${label} ${sizeLabel(row)} ${main} ${small}${extraLabel}${adviceLabel}`)}"><span class="matrix-batch-marker" aria-hidden="true">✓</span>${recommended?'<span class="matrix-rec-marker" aria-hidden="true">补</span>':""}<span ${view==="plan"?`data-plan-cell="${esc(row.sku)}"`:""}>${esc(main)}</span><small ${view==="plan"?`data-plan-cell-state="${esc(row.sku)}"`:""}>${esc(small)}</small>${receiving}</button></td>`;
   }).join("")}</tr>`;}).join("")}</tbody></table></div>`;
 }
 function renderDetail() {
@@ -368,20 +431,20 @@ function renderPlans() {
     ${renderBatchCost()}
     <div class="plans-workspace"><div class="panel"><h2>已保存方案</h2>${all.length?all.map(item=>`<div class="list-card"><div><strong>${esc(item.name)}</strong><p>${esc(styleName(item.style))} · ${item.target_days} 天 · ${sum(item.lines || [],"quantity")} 双 · ${planStatus(item)}</p><p>${esc(dateText(item.updated_at))}</p></div><button data-plan="${esc(item.id)}" class="${current?.id===item.id?"active":""}">打开</button></div>`).join(""):'<div class="empty"><strong>还没有保存方案</strong>在“按尺码补货”采用建议，或新建一份草稿。</div>'}</div>
     <div class="panel">${current?`<div class="heading"><h2>${esc(current.name)}</h2><span class="tag">${planStatus(current)}</span></div><p class="muted">参考 ${current.target_days} 天 · 已保存</p>
-    <p class="plan-matrix-note">格子显示本次方案数量，— 是未填写，0 是明确不补；点选尺码，在上方修改后保存。</p>
-    ${renderCurrentCost()}${renderDetail()}${matrixTable("plan")}
+    ${renderCurrentCost()}${renderDetail()}${renderBatchFill()}${matrixTable("plan")}
     <div class="link-row"><button data-page="matrix">回到尺码页${current.status==="draft"?"修改":"查看"}</button><a class="button" href="/api/plans/${encodeURIComponent(current.id)}/export.csv">导出 CSV</a>${current.status==="draft"?'<button class="primary" data-action="confirm-purchase">我已采购，确认数量</button>':""}</div>
     <p class="muted" style="margin-top:14px">导出文件供单款沟通核对；已采购方案保留当时数量。</p>`:'<div class="empty">选择左侧一份方案查看明细。</div>'}</div></div></div>`;
 }
 function purchaseLabel(item) {
   if(item.status==="cancelled")return "已取消登记";
-  if(item.shipment_archived_at)return "领星已核实发货 · 已归档";
+  if(item.shipment_archived_at)return item.inbound_matches?.length?"领星已发在途 · 已归档":"领星已核实发货 · 已归档";
   const total=sum(item.lines || [],"ordered"),shipped=sum(item.lines || [],"shipped"),received=sum(item.lines || [],"received");
   if(item.reconciled_snapshot_id)return "已接收并核对";
   if(received===total && total>0)return "已接收 · 待核库存";
   if(received>0)return "部分接收";
   if(shipped===total && total>0)return "已发货";
   if(shipped>0)return "部分发货";
+  if(item.forwarder_handoff_confirmed)return "已交货代 · 待发";
   return "已购未发";
 }
 function historicalPending(item) {
@@ -415,6 +478,7 @@ function shipmentTimingText(item) {
   const date=timing.ship_date;
   if(!date)return "发货时间待确认";
   if(timing.ship_date_kind==="actual")return `${shortDate(date)} 实际发出`;
+  if(item.inbound_matches?.length)return `领星 ${shortDate(date)} 显示在途`;
   if(timing.ship_date_kind==="estimated")return `约 ${shortDate(date)} 发出（估算）`;
   return `预计 ${shortDate(date)} 发货`;
 }
@@ -434,6 +498,7 @@ function timingDetails(item) {
   if(timing.available_date_basis)notes.push(`到仓 / 可售估算：${timing.available_date_basis}`);
   else if(timing.expected_available_date)notes.push(`到仓 / 可售按发货后约 ${timing.transit_days || transitDays()} 天估算。`);
   if(item.received_date)notes.push(`实际到货日期：${item.received_date}`);
+  if(item.forwarder_handoff_confirmed)notes.push(`已确认交给货代${item.forwarder_reported_date?`（反馈日期：${item.forwarder_reported_date}）`:""}；${item.inbound_matches?.length?"领星已显示在途。":"实际发货仍待领星核实。"}`);
   if(item.source_note)notes.push(item.source_note);
   return notes.length?`<details><summary>日期与记录依据</summary>${notes.map(note=>`<p class="audit-note">${esc(note)}</p>`).join("")}</details>`:"";
 }
@@ -469,9 +534,102 @@ function renderSales() {
   const all=styleRows();
   return `<div class="page"><div class="heading"><div><h1>销量与本轮表现</h1><p class="muted">累计售出永久保留。本轮售出是观察起点之后的销量，不代表精确追溯某批货卖了多少。</p></div>${selectStyleHTML()}</div>
   <div class="panel"><div class="metrics"><div class="metric"><span>FBA 近 7 天</span><strong>${sum(all,"n7")}</strong></div><div class="metric"><span>FBA 前 7 天</span><strong>${sum(all,"p7")}</strong></div><div class="metric"><span>FBA 近 28 天</span><strong>${sum(all,"n28")}</strong></div><div class="metric"><span>FBM 近 7 天</span><strong>${sum(all,"fbm7")}</strong></div></div>
-  <p class="muted">本轮起点按逐码保存的日期和依据计算。未确认的起点保持空白；已记录到货不再次加库存。</p>
+  <p class="muted">未确认的本轮起点保持空白；不会自动设为 0 或随意选择日期。</p>
   <div class="table-wrap"><table class="data-table"><thead><tr><th>颜色 / 尺码</th><th>FBA 7 天</th><th>前 7 天</th><th>14 天</th><th>28 天</th><th>FBM 7 天</th><th>累计售出</th><th>起点累计</th><th>本轮售出</th><th>观察起点</th><th></th></tr></thead><tbody>${all.map(row=>{const cycle=cycleFor(row);const round=number(cycle.roundSold)?cycle.roundSold:number(cycle.baseline)&&number(cycle.currentSold)?cycle.currentSold-cycle.baseline:null;return `<tr><td>${esc(row.colorLabel)} ${esc(sizeLabel(row))}</td><td>${show(row.n7)}</td><td>${show(row.p7)}</td><td>${show(row.n14)}</td><td>${show(row.n28)}</td><td>${show(row.fbm7)}</td><td>${show(cycle.currentSold)}</td><td>${number(cycle.baseline)?cycle.baseline:"未确认"}</td><td>${number(round)?round:"待确认"}</td><td>${esc(cycle.baselineDate || "待确认")}<br><span class="muted">${esc(cycle.baselineKind || "")}</span></td><td><button class="small" data-cycle="${esc(row.sku)}">设起点</button></td></tr>`;}).join("")}</tbody></table></div>
   <p class="muted">销量来源截至美西 ${esc(state.data.metadata.salesEnd)}，普通销售与换货、退货、退款区分。FBM 与 FBA 分列。</p></div></div>`;
+}
+function returnRate(item) {
+  if(!item||!number(item.sold)||!number(item.returned)||item.sold<=0)return null;
+  return item.returned/item.sold;
+}
+function formatReturnRate(value) {
+  return number(value)?new Intl.NumberFormat("zh-CN",{style:"percent",minimumFractionDigits:1,maximumFractionDigits:1}).format(value):"—";
+}
+function returnReport() { return returnState.cache[returnState.days] || null; }
+function returnRows() { return returnReport()?.rows || []; }
+function returnStyles() { return returnReport()?.styles || []; }
+function returnColors() {
+  const report=returnReport();
+  return (report?.colors || []).filter(item=>item.style===returnState.style);
+}
+function pickReturnStyle() {
+  const all=returnStyles();
+  if(!all.some(item=>item.style===returnState.style)){
+    returnState.style=all.find(item=>item.style===state.style)?.style || all[0]?.style || null;
+    returnState.sku=null;
+  }
+  const selected=returnRows().filter(row=>row.style===returnState.style);
+  if(!selected.some(row=>row.sku===returnState.sku))returnState.sku=[...selected].sort((a,b)=>(b.returned || 0)-(a.returned || 0))[0]?.sku || null;
+}
+async function loadReturns(force=false) {
+  const days=returnState.days;
+  const requestId=++returnState.requestId;
+  if(!force&&returnState.cache[days]){returnState.loading=false;returnState.error="";pickReturnStyle();if(state.page==="returns")render();return;}
+  returnState.loading=true;returnState.error="";
+  if(state.page==="returns")render();
+  try{
+    const report=await api(`/api/returns?days=${days}`);
+    if(requestId!==returnState.requestId)return;
+    if(report.available&&(!Array.isArray(report.styles)||!Array.isArray(report.rows)))throw new Error("退货资料格式未完整返回，请重新读取。");
+    returnState.cache[days]=report;pickReturnStyle();
+  }catch(error){
+    if(requestId===returnState.requestId)returnState.error=error.message || "暂时无法读取退货资料。";
+  }finally{
+    if(requestId===returnState.requestId){returnState.loading=false;if(state.page==="returns")render();}
+  }
+}
+function returnCount(value) { return number(value)?String(value):"—"; }
+function returnSidebar() {
+  return `<aside class="style-sidebar returns-sidebar"><label>找款式<input type="search" id="return-style-search" placeholder="名称或款号" value="${esc(returnState.search)}"></label><div class="style-list">${styles().map(item=>`<button type="button" class="style-button ${item.id===returnState.style?"active":""} ${seasonalHold(item.id)?"style-seasonal":""}" data-return-style="${esc(item.id)}" data-return-search="${esc((item.label+" "+item.id).toLowerCase())}" ${(item.label+" "+item.id).toLowerCase().includes(returnState.search.toLowerCase())?"":"hidden"} ${item.id===returnState.style?'aria-current="true"':""}>${productImage(item.id,"style-thumb")}<span class="style-label"><strong>${esc(item.label.replace(item.id,"").trim() || item.id)}</strong><small>${esc(item.id)}</small>${seasonalHold(item.id)?'<span class="season-tag">春夏再看</span>':""}</span></button>`).join("")}</div></aside>`;
+}
+function returnColorFocus() {
+  const colors=returnColors();
+  if(!colors.length||colors.some(item=>!number(item.returned)))return "";
+  const most=Math.max(...colors.map(item=>item.returned));
+  if(most<=0)return "";
+  const leaders=colors.filter(item=>item.returned===most);
+  const names=leaders.slice(0,2).map(item=>`${item.colorLabel || item.color} ${item.returned} 双（售出 ${returnCount(item.sold)} 双，退货率 ${formatReturnRate(returnRate(item))}）`).join("、");
+  return `${leaders.length>1?"并列退货双数最多":"退货双数最多"}：${names}${leaders.length>2?"等":""}。`;
+}
+function returnEvaluation(item) {
+  if(!item || !number(item.sold) || !number(item.returned))return "这款的退货资料尚不完整，请等待数据更新。";
+  const caveat="近期订单的退货可能尚未完全回补，比例会随数据更新。";
+  const focus=item.returned>0?returnColorFocus():"";
+  if(item.sold===0&&item.returned>0)return `本期售出0双、退货${item.returned}双，没有同期销量可计算退货率；请结合来源数据核对。${focus}${caveat}`;
+  if(item.sold===0)return `本期没有FBA普通售出，暂时无法计算退货率。${caveat}`;
+  const shortSample=item.sold<20?"售出双数较少，少量退货就可能让比例明显波动。":"";
+  return `本期售出${item.sold}双、退货${item.returned}双，当前退货率${formatReturnRate(returnRate(item))}。${focus}${shortSample}${caveat}`;
+}
+function renderReturnMatrix() {
+  const items=returnRows().filter(row=>row.style===returnState.style);
+  if(!items.length)return '<div class="empty">这款暂未取得颜色与尺码资料。</div>';
+  const colors=[...new Map(items.map(row=>[row.color,row.colorLabel])).entries()];
+  const sizes=[...new Set([...items].sort(compareSizes).map(row=>row.size))];
+  const colorTotals=new Map(returnColors().map(item=>[item.color,item]));
+  return `<div class="table-wrap returns-grid-wrap"><table class="matrix returns-matrix"><thead><tr><th scope="col">颜色 / 尺码</th>${sizes.map(size=>`<th scope="col">${sizeHeader(items,size)}</th>`).join("")}<th scope="col" class="return-color-total-heading">颜色汇总<br><small>退货率</small></th></tr></thead><tbody>${colors.map(([color,label])=>{
+    const total=colorTotals.get(color);
+    return `<tr><th scope="row">${colorHeading(returnState.style,color,label)}</th>${sizes.map(size=>{
+      const row=items.find(item=>item.color===color&&item.size===size);if(!row)return '<td class="dash">—</td>';
+      const rate=returnRate(row);
+      return `<td><div class="return-cell ${number(row.returned)&&row.returned>0?"has-returns":""}" aria-label="${esc(`${label} ${sizeLabel(row)}，售出${returnCount(row.sold)}双，退货${returnCount(row.returned)}双，退货率${formatReturnRate(rate)}`)}"><strong>${formatReturnRate(rate)}</strong><small>售 ${esc(returnCount(row.sold))} · 退 ${esc(returnCount(row.returned))}</small></div></td>`;
+    }).join("")}<td class="return-color-total"><strong>${formatReturnRate(returnRate(total))}</strong><small>售 ${esc(returnCount(total?.sold))} · 退 ${esc(returnCount(total?.returned))}</small></td></tr>`;
+  }).join("")}</tbody></table></div>`;
+}
+function renderReturns() {
+  const report=returnReport(),md=report?.metadata || {};
+  const controls=`<div class="controls returns-periods"><span class="muted">统计期间</span>${[7,28,90].map(days=>`<button type="button" class="${returnState.days===days?"active":""}" data-return-days="${days}" aria-pressed="${returnState.days===days}">近 ${days} 天</button>`).join("")}<button type="button" class="quiet small" data-action="reload-returns">重新读取本地资料</button></div>`;
+  const selected=returnStyles().find(item=>item.style===returnState.style);
+  const title=returnState.style?styleName(returnState.style):"选择款式";
+  const count=returnRows().filter(row=>row.style===returnState.style).length;
+  const heading=`<div class="heading returns-product-heading"><div class="product-heading">${returnState.style?productImage(returnState.style):""}<div><h1>${esc(title)}</h1><span class="muted">${count?`${count} 个颜色尺码 · `:""}FBA 退货分析</span></div></div><div class="returns-style-rate"><span>这款退货率</span><strong>${formatReturnRate(returnRate(selected))}</strong></div></div>`;
+  const begin=`<div class="workspace decision-workspace returns-workspace">${returnSidebar()}<section class="panel returns-content">${heading}${controls}`;
+  if(returnState.loading)return `${begin}<div class="empty" role="status">正在读取退货资料…</div></section></div>`;
+  if(returnState.error)return `${begin}<div class="empty" role="alert"><strong>退货资料暂未读取成功</strong>${esc(returnState.error)}<p>请稍后重新读取。</p><button type="button" data-action="reload-returns">重新读取</button></div></section></div>`;
+  if(!report?.available)return `${begin}<div class="empty"><strong>这段期间还没有完整退货资料</strong>取得完整来源后再显示退货数与比例，资料缺失不会当成0。</div></section></div>`;
+  if(!selected)return `${begin}<div class="empty">请选择款式查看退货资料。</div></section></div>`;
+  const definition=md.definition || "按领星订单利润报表日期口径，FBA退货双数 ÷ FBA普通售出双数。";
+  const caveat=md.caveat || "近期订单的退货可能尚未完全回补；没有可计算的销量时显示—。";
+  return `${begin}<div class="returns-source-time">${md.startDate&&md.endDate?`统计日期：${esc(md.startDate)} 至 ${esc(md.endDate)}`:`数据截至美西 ${esc(md.salesEnd || "待核")}`} · 更新：${esc(dateText(md.capturedAtISO))}</div><div class="returns-evaluation"><strong>这款的退货情况</strong><p>${esc(returnEvaluation(selected))}</p></div><div class="returns-grid-heading"><h2>按颜色和尺码看退货</h2><p class="muted">格子里看各码退货率、售出和退货双数；表格可左右滑动，最右侧是颜色汇总。</p></div>${renderReturnMatrix()}<p class="muted returns-footnote">— 表示没有可计算的销量；0.0%表示已有销量、观察到的退货为0。近期订单的退货可能尚未完全回补。</p><details class="returns-source-details"><summary>统计口径与来源</summary><p>${esc(definition)}</p><p>${esc(caveat)}</p>${md.source?`<p class="audit-note">来源：${esc(md.source)}</p>`:""}</details></section></div>`;
 }
 function renderData() {
   const md=state.data.metadata;
@@ -481,7 +639,7 @@ function renderData() {
   <div class="panel" style="margin-top:18px"><div class="heading"><h2>最近修改记录</h2><button data-action="audit">更新记录</button></div><div class="table-wrap"><table class="data-table"><thead><tr><th>时间</th><th>动作</th><th>对象</th><th>记录</th></tr></thead><tbody>${state.audit.length?state.audit.slice(0,60).map(entry=>`<tr><td>${esc(dateText(entry.created_at || entry.timestamp))}</td><td>${esc(auditLabel(entry.action || entry.event || entry.type))}</td><td>${esc(entry.entity_id || entry.target_id || entry.entity || "")}</td><td class="audit-note">${esc(auditDetail(entry))}</td></tr>`).join(""):'<tr><td colspan="4">暂无显示记录，点“更新记录”读取。</td></tr>'}</tbody></table></div></div></div>`;
 }
 function auditLabel(value) {
-  const names={"snapshot.import":"导入快照","plan.create":"新建方案","plan.update":"修改方案","plan.adopt":"采用建议","plan.confirm":"方案登记采购","purchase.confirm":"确认采购","purchase.shipped":"登记发货","purchase.received":"登记接收","purchase.reconcile":"核对库存","feedback.create":"页面意见","backup.create":"创建备份","cycle.update":"修改本轮起点"};
+  const names={"snapshot.import":"导入快照","return_report.import":"更新退货资料","plan.create":"新建方案","plan.update":"修改方案","plan.adopt":"采用建议","plan.confirm":"方案登记采购","purchase.confirm":"确认采购","purchase.shipped":"登记发货","purchase.received":"登记接收","purchase.logistics.update":"更新货代进度","purchase.reconcile":"核对库存","feedback.create":"页面意见","backup.create":"创建备份","cycle.update":"修改本轮起点"};
   return names[value] || value || "修改";
 }
 function auditDetail(entry) {
@@ -578,20 +736,97 @@ function cycleModal(sku) {
 async function fetchAudit() {
   const data=await api("/api/audit");state.audit=data.entries || [];if(state.page==="data")render();
 }
+function finishMatrixGesture(cancelled=false) {
+  const gesture=matrixGesture;if(!gesture)return;
+  matrixGesture=null;document.documentElement.classList.remove("matrix-selecting");
+  if(gesture.dragged){
+    suppressMatrixClick=true;
+    if(cancelled){matrixSelection.skus=new Set(gesture.base);updateMatrixSelection();}
+  }
+  if(gesture.button.hasPointerCapture?.(gesture.pointerId))gesture.button.releasePointerCapture(gesture.pointerId);
+}
+function matrixCellAt(gesture,x,y) {
+  const hit=document.elementFromPoint(x,y)?.closest("td[data-matrix-row][data-matrix-col]");
+  if(hit&&gesture.table.contains(hit))return hit;
+  let closest=null,distance=Infinity;
+  gesture.table.querySelectorAll("td[data-matrix-row][data-matrix-col]").forEach(cell=>{
+    const rect=cell.getBoundingClientRect();
+    const dx=Math.max(rect.left-x,0,x-rect.right),dy=Math.max(rect.top-y,0,y-rect.bottom),next=dx*dx+dy*dy;
+    if(next<distance){closest=cell;distance=next;}
+  });
+  return closest;
+}
+function updateMatrixDrag(event) {
+  const gesture=matrixGesture;if(!gesture||gesture.pointerId!==event.pointerId)return;
+  if(!gesture.dragged){
+    if(Math.hypot(event.clientX-gesture.x,event.clientY-gesture.y)<6)return;
+    gesture.dragged=true;document.documentElement.classList.add("matrix-selecting");
+    window.getSelection()?.removeAllRanges();
+    gesture.button.setPointerCapture?.(gesture.pointerId);
+  }
+  event.preventDefault();
+  const cell=matrixCellAt(gesture,event.clientX,event.clientY);if(!cell)return;
+  const row=Number(cell.dataset.matrixRow),column=Number(cell.dataset.matrixCol),key=`${row}:${column}`;
+  if(gesture.end===key)return;gesture.end=key;
+  const selected=new Set(gesture.additive?gesture.base:[]);
+  const minRow=Math.min(gesture.row,row),maxRow=Math.max(gesture.row,row),minCol=Math.min(gesture.column,column),maxCol=Math.max(gesture.column,column);
+  gesture.table.querySelectorAll("td[data-matrix-row][data-matrix-col]").forEach(item=>{
+    const r=Number(item.dataset.matrixRow),c=Number(item.dataset.matrixCol);
+    const button=item.querySelector("button[data-sku]");
+    if(button&&r>=minRow&&r<=maxRow&&c>=minCol&&c<=maxCol)selected.add(button.dataset.sku);
+  });
+  matrixSelection.skus=selected;updateMatrixSelection();
+}
+document.addEventListener("pointerdown",event=>{
+  suppressMatrixClick=false;
+  if(event.pointerType!=="mouse"||event.button!==0||state.busy||!canBatchFill()||$("#modal").open)return;
+  const button=event.target.closest('.matrix[data-matrix-selectable="true"] button[data-sku]');if(!button)return;
+  finishMatrixGesture();
+  const cell=button.closest("td");
+  matrixGesture={pointerId:event.pointerId,button,table:button.closest("table"),x:event.clientX,y:event.clientY,row:Number(cell.dataset.matrixRow),column:Number(cell.dataset.matrixCol),base:new Set(matrixSelection.skus),additive:event.ctrlKey||event.metaKey,dragged:false,end:null};
+  event.preventDefault();button.focus({preventScroll:true});
+});
+document.addEventListener("pointermove",event=>{
+  if(!matrixGesture||matrixGesture.pointerId!==event.pointerId)return;
+  if(!(event.buttons&1)){finishMatrixGesture();return;}
+  updateMatrixDrag(event);
+},{passive:false});
+document.addEventListener("pointerup",event=>{
+  if(!matrixGesture||matrixGesture.pointerId!==event.pointerId)return;
+  if(matrixGesture.dragged)updateMatrixDrag(event);
+  finishMatrixGesture();
+});
+document.addEventListener("pointercancel",event=>{if(matrixGesture?.pointerId===event.pointerId)finishMatrixGesture(true);});
+document.addEventListener("dragstart",event=>{if(event.target.closest?.('.matrix[data-matrix-selectable="true"]'))event.preventDefault();});
+window.addEventListener("blur",()=>finishMatrixGesture());
 document.addEventListener("click",event=>{
+  if(suppressMatrixClick&&event.detail>0){suppressMatrixClick=false;event.preventDefault();event.stopPropagation();return;}
   if(!event.target.closest(".nav-more"))document.querySelector(".nav-more[open]")?.removeAttribute("open");
   const button=event.target.closest("button,[data-page]");if(!button || state.busy)return;
-  if(button.dataset.page){if($("#modal").open)closeModal();state.page=button.dataset.page;render();if(state.page==="data")action(fetchAudit);return;}
+  if(button.dataset.page){if($("#modal").open)closeModal();state.page=button.dataset.page;render();if(state.page==="data")action(fetchAudit);if(state.page==="returns")action(()=>loadReturns());return;}
+  if(button.dataset.returnDays){returnState.days=Number(button.dataset.returnDays);returnState.sku=null;action(()=>loadReturns());return;}
+  if(button.dataset.returnStyle){returnState.style=button.dataset.returnStyle;returnState.sku=null;pickReturnStyle();render();return;}
+  if(button.dataset.returnSku){returnState.sku=button.dataset.returnSku;render();$("#returns-sku-detail")?.scrollIntoView({block:"nearest",behavior:"auto"});return;}
   if(button.dataset.style){action(()=>selectStyle(button.dataset.style));return;}
   if(button.dataset.days){action(()=>changeDays(button.dataset.days));return;}
   if(button.dataset.view){state.view=button.dataset.view;pickPurchasedSku();render();return;}
   if(button.dataset.cancelPurchase){cancelPurchaseModal(button.dataset.cancelPurchase);return;}
-  if(button.dataset.sku){state.sku=button.dataset.sku;render();$("#sku-advice")?.scrollIntoView({block:"nearest",behavior:"auto"});return;}
+  if(button.dataset.sku){
+    if(canBatchFill()&&(event.ctrlKey||event.metaKey)){
+      const sku=button.dataset.sku;
+      if(matrixSelection.skus.has(sku))matrixSelection.skus.delete(sku);else matrixSelection.skus.add(sku);
+      updateMatrixSelection();return;
+    }
+    clearMatrixSelection(false);state.sku=button.dataset.sku;render();$("#sku-advice")?.scrollIntoView({block:"nearest",behavior:"auto"});return;
+  }
   if(button.dataset.gotoSku){const row=rows().find(row=>row.sku===button.dataset.gotoSku);action(async()=>{await selectStyle(row.style);state.sku=row.sku;state.page="matrix";render();});return;}
   if(button.dataset.plan){action(async()=>{const selected=state.data.plans.find(item=>item.id===button.dataset.plan);state.planId=selected.id;state.style=selected.style;state.days=state.dayEdits[selected.id] || selected.target_days;state.sku=null;await loadRecommendations();render();});return;}
   if(button.dataset.purchase){state.purchaseId=button.dataset.purchase;render();return;}
   if(button.dataset.cycle){cycleModal(button.dataset.cycle);return;}
   const type=button.dataset.action;
+  if(type==="reload-returns"){action(()=>loadReturns(true));return;}
+  if(type==="clear-matrix-selection"){finishMatrixGesture(true);clearMatrixSelection();return;}
+  if(type==="apply-batch-quantity"){applyBatchQuantity();return;}
   if(type==="dismiss-error"){$("#error").hidden=true;return;}
   if(type==="close-modal"){closeModal();return;}
   if(type==="new-plan"){newPlanModal();return;}
@@ -624,12 +859,19 @@ document.addEventListener("click",event=>{
   if(type==="refresh"){action(async()=>{await bootstrap();notify("已读取本地最新保存内容，未存手改仍保留；业务来源快照日期见顶部。");});}
 });
 document.addEventListener("keydown",event=>{
-  if(event.key==="Escape"&&!$("#modal").open){const menu=document.querySelector(".nav-more[open]");if(menu){menu.removeAttribute("open");menu.querySelector("summary").focus();}}
+  if(event.key==="Escape"&&!$("#modal").open){
+    const menu=document.querySelector(".nav-more[open]");
+    if(menu){menu.removeAttribute("open");menu.querySelector("summary").focus();return;}
+    if(matrixGesture||matrixSelection.skus.size){finishMatrixGesture(true);clearMatrixSelection();event.preventDefault();}
+  }
+  if(event.key==="Enter"&&event.target.matches?.("[data-batch-quantity]")){event.preventDefault();applyBatchQuantity();}
 });
 document.addEventListener("input",event=>{
   const input=event.target;
+  if(input.matches?.("[data-batch-quantity]")){matrixSelection.quantity=input.value;input.setCustomValidity("");const error=$("[data-batch-error]");if(error)error.hidden=true;return;}
   if(input.dataset.priceTier!==undefined){const edits=state.tierPriceEdits[state.style] || (state.tierPriceEdits[state.style]={});edits[input.dataset.priceTier]=input.value;document.querySelectorAll("[data-current-cost]").forEach(el=>el.textContent=currentCostText());updateSaveState();return;}
   if(input.dataset.purchasePrice){state.priceEdits[input.dataset.purchasePrice]=input.value;document.querySelectorAll("[data-current-cost]").forEach(el=>el.textContent=currentCostText());updateSaveState();return;}
+  if(input.id==="return-style-search"){returnState.search=input.value;document.querySelectorAll(".returns-sidebar .style-button").forEach(button=>{button.hidden=!button.dataset.returnSearch.includes(input.value.toLowerCase());});return;}
   if(input.id==="style-search"){
     state.search=input.value;document.querySelectorAll(".style-button").forEach(button=>{button.hidden=!button.dataset.search.includes(input.value.toLowerCase());});return;
   }
@@ -652,6 +894,7 @@ document.addEventListener("input",event=>{
   }
 });
 document.addEventListener("change",event=>{
+  if(event.target.matches?.("[data-return-style-select]")){returnState.style=event.target.value;returnState.sku=null;pickReturnStyle();render();return;}
   if(event.target.id==="purchase-batch-filter"){state.purchaseBatchId=event.target.value;pickPurchasedSku();render();return;}
   if(event.target.dataset.action==="select-style")action(()=>selectStyle(event.target.value));
   if(event.target.id==="event-type"){

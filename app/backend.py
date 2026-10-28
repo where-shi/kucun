@@ -13,6 +13,7 @@ import uuid
 from contextlib import closing, contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_DB = APP_DIR.parent / "data" / "replenishment.sqlite3"
@@ -35,6 +36,22 @@ class AppError(Exception):
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def pacific_date(stamp):
+    try:
+        return stamp.astimezone(ZoneInfo("America/Los_Angeles")).date()
+    except ZoneInfoNotFoundError:
+        # Windows Python may lack IANA data. US Pacific has used these rules since 2007.
+        utc = stamp.astimezone(timezone.utc)
+        if utc.year < 2007:
+            raise AppError("此时间的美西时区资料不可用，请使用含IANA时区资料的Python环境") from None
+        march = date(utc.year, 3, 1)
+        november = date(utc.year, 11, 1)
+        dst_start = datetime(utc.year, 3, 1 + (6 - march.weekday()) % 7 + 7, 10, tzinfo=timezone.utc)
+        dst_end = datetime(utc.year, 11, 1 + (6 - november.weekday()) % 7, 9, tzinfo=timezone.utc)
+        offset = -7 if dst_start <= utc < dst_end else -8
+        return utc.astimezone(timezone(timedelta(hours=offset))).date()
 
 
 def dumps(value):
@@ -121,9 +138,11 @@ def batch_timing(record, transit_days=30):
     shipped_events = [event["date"] for event in record.get("events", []) if event.get("type") == "shipped"]
     if not actual and shipped_events:
         actual = max(shipped_events)
-    ship_date = actual or record.get("estimated_ship_date") or record.get("expected_ship_date")
-    kind = "actual" if actual else "estimated" if record.get("estimated_ship_date") else "planned"
-    basis = record.get("ship_date_basis") or ("已记录实际发货日期" if actual else "方案中的预计发货日期" if ship_date else "发货时间待确认")
+    system_dates = [m.get("first_observed_date") for m in record.get("inbound_matches", []) if m.get("first_observed_date")]
+    observed_date = max(system_dates) if system_dates else None
+    ship_date = actual or observed_date or record.get("estimated_ship_date") or record.get("expected_ship_date")
+    kind = "actual" if actual else "estimated" if observed_date or record.get("estimated_ship_date") else "planned"
+    basis = record.get("ship_date_basis") or ("已记录实际发货日期" if actual else "领星首次显示在途的日期，作为估算起点；实际发出日期未知" if observed_date else "方案中的预计发货日期" if ship_date else "发货时间待确认")
     explicit_available = record.get("expected_available_date")
     available = explicit_available or ((date.fromisoformat(ship_date) + timedelta(days=transit_days)).isoformat() if ship_date else None)
     return dict(ship_date=ship_date, ship_date_kind=kind if ship_date else None,
@@ -366,6 +385,20 @@ class Store:
                 record["image_path"] = validate_product_image_path(payload["image_path"])
             if "image_source" in payload:
                 record["image_source"] = text_value(payload["image_source"], "图片来源依据", limit=2000)
+            if "color_images" in payload:
+                images = payload["color_images"]
+                colors = {row["color"] for row in self._style_rows(conn, style)}
+                if not isinstance(images, dict) or not set(images).issubset(colors):
+                    raise AppError("颜色图片必须对应本款已有颜色")
+                validated_images = {}
+                for color, image in images.items():
+                    if not isinstance(image, dict) or set(image) != {"path", "source"}:
+                        raise AppError("颜色图片格式无效")
+                    path = validate_product_image_path(image["path"])
+                    if not path:
+                        raise AppError("颜色图片路径不能为空")
+                    validated_images[color] = {"path": path, "source": text_value(image["source"], "图片来源依据", limit=2000)}
+                record["color_images"] = validated_images
             if "arrival_status" in payload:
                 if payload["arrival_status"] not in ("", "arrived"):
                     raise AppError("到仓确认状态无效")
@@ -418,7 +451,9 @@ class Store:
         except AppError:
             raise AppError("图片不存在", 404, "not_found") from None
         with self.connection() as conn:
-            if not any(record.get("image_path") == image_path
+            if not any(record.get("image_path") == image_path or any(
+                       isinstance(image, dict) and image.get("path") == image_path
+                       for image in (record.get("color_images") or {}).values())
                        for record in self._list(conn, "style_preference")):
                 raise AppError("图片尚未关联到款式", 404, "not_found")
         directory = (self.path.parent / "product-images").resolve()
@@ -438,8 +473,9 @@ class Store:
                 continue
             if purchase.get("shipment_archived_at"):
                 captured = self._snapshot(conn)[1].get("inventoryCapturedAtISO")
-                observed = max(match["observed_at"] for match in purchase["shipment_matches"])
-                if captured and datetime.fromisoformat(captured) >= datetime.fromisoformat(observed):
+                observations = [m["observed_at"] for m in purchase.get("shipment_matches", []) + purchase.get("inbound_matches", [])]
+                observed = max(observations) if observations else None
+                if captured and observed and datetime.fromisoformat(captured) >= datetime.fromisoformat(observed):
                     continue
             for line in purchase["lines"]:
                 if line["ordered"] > 0:
@@ -512,6 +548,224 @@ class Store:
     def recommend(self, style=None, days=35):
         with self.connection() as conn:
             return self._recommend(conn, style, days)
+
+    def import_returns(self, document):
+        """Persist complete FBA period reports independently of stock snapshots."""
+        if not isinstance(document, dict) or type(document.get("schemaVersion")) is not int or document["schemaVersion"] != 1:
+            raise AppError("退货数据必须使用schemaVersion 1")
+        configured_sid = os.environ.get("REPLENISHMENT_LINGXING_SID", "").strip()
+        if not configured_sid.isdigit() or type(document.get("sid")) is not int or str(document["sid"]) != configured_sid:
+            raise AppError("请先配置店铺 SID，且退货数据店铺须与配置一致")
+        report_sid = document["sid"]
+        if document.get("basis") != "period_fba" or document.get("channel", "FBA") != "FBA":
+            raise AppError("退货报告只接受同期FBA普通销量与FBA实际退货口径")
+        source = text_value(document.get("source"), "退货来源", required=True, limit=2000)
+        sales_end = iso_date(document.get("salesEnd"), "退货数据截止日期")
+        captured = document.get("capturedAtISO")
+        try:
+            stamp = datetime.fromisoformat(captured.replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                raise ValueError()
+        except (ValueError, TypeError, AttributeError):
+            raise AppError("capturedAtISO须为含时区的ISO时间") from None
+        if date.fromisoformat(sales_end) >= pacific_date(stamp):
+            raise AppError("退货窗口须排除未完整结束的美西当天")
+        incoming = document.get("reports")
+        if not isinstance(incoming, list) or len(incoming) != 3:
+            raise AppError("退货数据必须一次提供完整的7、28、90日窗口")
+        validated, seen_days = [], set()
+        for report in incoming:
+            if not isinstance(report, dict):
+                raise AppError("退货窗口格式无效")
+            days = integer(report.get("days"), "退货窗口天数", 1, 365)
+            if days not in (7, 28, 90) or days in seen_days:
+                raise AppError("退货数据必须且只能各包含一个7、28、90日窗口")
+            seen_days.add(days)
+            start = iso_date(report.get("startDate"), "退货窗口开始日期")
+            end = iso_date(report.get("endDate"), "退货窗口结束日期")
+            if end != sales_end or (date.fromisoformat(end) - date.fromisoformat(start)).days + 1 != days:
+                raise AppError("退货窗口日期与天数或截止日期不符")
+            total = integer(report.get("sourceTotal"), "退货来源总行数", 0)
+            pages, rows = report.get("pages"), report.get("rows")
+            if not isinstance(pages, list) or not pages or not isinstance(rows, list):
+                raise AppError("退货报告须包含完整分页数量和逐MSKU行")
+            if sum(integer(n, "退货分页行数", 0) for n in pages) != total or len(rows) != total:
+                raise AppError("退货报告分页未取全或来源行数不一致")
+            previous_report = report.get("previousReport")
+            previous_by_sku = None
+            if previous_report is not None:
+                if not isinstance(previous_report, dict):
+                    raise AppError("前期退货窗口格式无效")
+                previous_start = iso_date(previous_report.get("startDate"), "前期退货窗口开始日期")
+                previous_end = iso_date(previous_report.get("endDate"), "前期退货窗口结束日期")
+                if (date.fromisoformat(start) - date.fromisoformat(previous_end)).days != 1 or (
+                        date.fromisoformat(previous_end) - date.fromisoformat(previous_start)).days + 1 != days:
+                    raise AppError("前期退货窗口须紧接本期之前且天数相同")
+                previous_total = integer(previous_report.get("sourceTotal"), "前期退货来源总行数", 0)
+                previous_pages, previous_rows = previous_report.get("pages"), previous_report.get("rows")
+                if not isinstance(previous_pages, list) or not previous_pages or not isinstance(previous_rows, list):
+                    raise AppError("前期退货报告须包含完整分页数量和逐MSKU行")
+                if sum(integer(n, "前期退货分页行数", 0) for n in previous_pages) != previous_total or len(previous_rows) != previous_total:
+                    raise AppError("前期退货报告分页未取全或来源行数不一致")
+                previous_by_sku = {}
+                for previous_row in previous_rows:
+                    if not isinstance(previous_row, dict):
+                        raise AppError("前期退货MSKU行格式无效")
+                    previous_sku = text_value(previous_row.get("sku"), "前期退货MSKU", required=True, limit=300)
+                    if previous_sku != previous_row["sku"] or previous_sku in previous_by_sku:
+                        raise AppError("前期退货报告包含重复或无效MSKU")
+                    if type(previous_row.get("sid")) is not int or previous_row["sid"] != report_sid:
+                        raise AppError("前期退货MSKU行店铺不符")
+                    previous_metrics = {key: integer(previous_row.get(key), f"{previous_sku}前期的{key}", 0, 100_000_000)
+                                        for key in ("sold", "returned", "fbaReturned")}
+                    if previous_metrics["returned"] != previous_metrics["fbaReturned"]:
+                        raise AppError("前期FBA退货分子只能包含FBA实际退货数量")
+                    previous_by_sku[previous_sku] = dict(sku=previous_sku, sid=report_sid, **previous_metrics)
+                previous_report = dict(startDate=previous_start, endDate=previous_end, sourceTotal=previous_total,
+                                       pages=previous_pages, rows=sorted(previous_by_sku.values(), key=lambda row: row["sku"]))
+            clean, seen_skus = [], set()
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise AppError("退货MSKU行格式无效")
+                sku = text_value(row.get("sku"), "退货MSKU", required=True, limit=300)
+                if sku != row["sku"] or sku in seen_skus:
+                    raise AppError("退货报告包含重复或无效MSKU")
+                if type(row.get("sid")) is not int or row["sid"] != report_sid:
+                    raise AppError("退货MSKU行店铺不符")
+                seen_skus.add(sku)
+                metrics = {key: integer(row.get(key), f"{sku}的{key}", 0, 100_000_000)
+                           for key in ("sold", "returned", "fbaReturned")}
+                if metrics["fbaReturned"] != metrics["returned"]:
+                    raise AppError("FBA退货分子只能包含FBA实际退货数量")
+                excluded = row.get("excludedFbmReturned", row.get("fbmReturned"))
+                if excluded is not None:
+                    excluded = integer(excluded, f"{sku}的排除FBM退货量", 0, 100_000_000)
+                previous = {key: row.get(key) for key in ("previousSold", "previousReturned")}
+                if (previous["previousSold"] is None) != (previous["previousReturned"] is None):
+                    raise AppError("前期销量和退货数须同时已核实，未取数时均保持空白")
+                for key, value in previous.items():
+                    if value is not None:
+                        integer(value, f"{sku}的{key}", 0, 100_000_000)
+                if previous_by_sku is not None:
+                    observed_previous = previous_by_sku.get(sku, {"sold": 0, "returned": 0})
+                    expected_previous = dict(previousSold=observed_previous["sold"], previousReturned=observed_previous["returned"])
+                    if any(previous[key] is not None and previous[key] != value for key, value in expected_previous.items()):
+                        raise AppError("逐码前期数量与完整前期来源不符")
+                    previous = expected_previous
+                reason = row.get("mainReason")
+                if reason is not None:
+                    reason = text_value(reason, f"{sku}的退货主因", limit=2000) or None
+                source_rate = row.get("sourceRate")
+                if source_rate is not None:
+                    if not number(source_rate) or source_rate < 0:
+                        raise AppError("来源退货率须为非负有限比例或空白")
+                    if metrics["sold"] > 0 and abs(source_rate - metrics["returned"] / metrics["sold"]) > 0.0001:
+                        raise AppError("来源退货率与FBA退货数及FBA销量不符")
+                clean.append(dict(sku=sku, sid=report_sid, **metrics, **previous,
+                                  excludedFbmReturned=excluded, mainReason=reason, sourceRate=source_rate))
+            clean.sort(key=lambda row: row["sku"])
+            record = dict(id=str(days), schemaVersion=1, sid=report_sid, basis="period_fba", channel="FBA",
+                          source=source, capturedAtISO=captured, salesEnd=sales_end, days=days,
+                          startDate=start, endDate=end, sourceTotal=total, pages=pages, rows=clean)
+            if previous_report is not None:
+                record["previousReport"] = previous_report
+            record["digest"] = hashlib.sha256(dumps(record).encode("utf8")).hexdigest()
+            validated.append(record)
+        if seen_days != {7, 28, 90}:
+            raise AppError("退货报告缺少完整窗口")
+        with self.connection(write=True) as conn:
+            old = {int(report["days"]): report for report in self._list(conn, "return_report")}
+            for record in validated:
+                previous = old.get(record["days"])
+                if previous and (record["salesEnd"] < previous["salesEnd"] or stamp < datetime.fromisoformat(
+                        previous["capturedAtISO"].replace("Z", "+00:00"))):
+                    raise AppError("退货报告截止日或采集时间不能早于已保存资料", 409, "older_return_report")
+            if all(old.get(record["days"], {}).get("digest") == record["digest"] for record in validated):
+                return {"imported": False, "reason": "相同退货报告已导入", "salesEnd": sales_end, "days": [7, 28, 90]}
+            for record in validated:
+                self._put(conn, "return_report", record["id"], record)
+            result = dict(imported=True, salesEnd=sales_end, capturedAtISO=captured,
+                          days=[7, 28, 90], source=source,
+                          sourceRows={str(r["days"]): r["sourceTotal"] for r in validated})
+            before = {str(days): {key: value.get(key) for key in ("salesEnd", "capturedAtISO", "digest")}
+                      for days, value in old.items()}
+            self._audit(conn, "return_report.import", "7_28_90", before, result)
+            return result
+
+    @staticmethod
+    def _return_totals(rows):
+        def known_sum(key):
+            return sum(row[key] for row in rows) if all(row.get(key) is not None for row in rows) else None
+        sold = sum(row["sold"] for row in rows)
+        returned = sum(row["returned"] for row in rows)
+        previous_sold, previous_returned = known_sum("previousSold"), known_sum("previousReturned")
+        rate = returned / sold if sold > 0 else None
+        previous_rate = previous_returned / previous_sold if previous_sold and previous_returned is not None else None
+        return dict(sold=sold, returned=returned, fbaReturned=returned, fbmReturned=0,
+                    excludedFbmReturned=known_sum("excludedFbmReturned"), rate=rate,
+                    previousSold=previous_sold, previousReturned=previous_returned, previousRate=previous_rate,
+                    rateChange=rate - previous_rate if rate is not None and previous_rate is not None else None,
+                    rateStatus="no_sales_base" if sold == 0 and returned > 0 else "no_sales" if sold == 0 else "available",
+                    noSalesBase=sold == 0 and returned > 0, skuCount=len(rows))
+
+    def returns(self, days=28, style=None):
+        days = integer(days, "退货窗口天数", 1, 365)
+        if days not in (7, 28, 90):
+            raise AppError("退货窗口仅支持7、28、90天")
+        with self.connection() as conn:
+            all_rows = self._rows(conn)
+            if style is not None:
+                self._style_rows(conn, style)
+            report = next((r for r in self._list(conn, "return_report") if r["days"] == days), None)
+            if report is None:
+                return dict(available=False, metadata={"days": days, "channel": "FBA", "basis": "period_fba"},
+                            summary=None, styles=[], colors=[], rows=[], reasonCoverage=None)
+            by_sku = {row["sku"]: row for row in report["rows"]}
+            previous_report = report.get("previousReport")
+            previous_by_sku = {row["sku"]: row for row in previous_report["rows"]} if previous_report is not None else None
+            enriched = []
+            for row in all_rows:
+                values = by_sku.get(row["sku"])
+                metrics = copy(values) if values is not None else dict(sku=row["sku"], sid=report["sid"], sold=0,
+                    returned=0, fbaReturned=0, excludedFbmReturned=0, previousSold=None,
+                    previousReturned=None, mainReason=None, sourceRate=None)
+                if previous_by_sku is not None:
+                    previous_values = previous_by_sku.get(row["sku"], {"sold": 0, "returned": 0})
+                    metrics.update(previousSold=previous_values["sold"], previousReturned=previous_values["returned"])
+                metadata = {key: row.get(key) for key in
+                            ("sku", "style", "styleLabel", "color", "colorLabel", "size", "cnSize", "sizeOrder")}
+                totals = self._return_totals([metrics])
+                enriched.append(dict(metadata, **{k: v for k, v in metrics.items() if k != "sku"},
+                                     **{k: totals[k] for k in ("rate", "previousRate", "rateChange", "rateStatus", "noSalesBase")},
+                                     sourcePresent=values is not None, fbmReturned=0))
+            groups = {}
+            color_groups = {}
+            for row in enriched:
+                groups.setdefault(row["style"], []).append(row)
+                if style is None or row["style"] == style:
+                    color_groups.setdefault((row["style"], row["color"]), []).append(row)
+            styles = [dict(style=key, styleLabel=rows[0]["styleLabel"], **self._return_totals(rows))
+                      for key, rows in groups.items()]
+            colors = [dict(style=key[0], color=key[1], colorLabel=rows[0]["colorLabel"],
+                           **self._return_totals(rows)) for key, rows in color_groups.items()]
+            selected = [row for row in enriched if style is None or row["style"] == style]
+            with_reason = [r for r in selected if r["returned"] > 0 and r["mainReason"]]
+            without_reason = [r for r in selected if r["returned"] > 0 and not r["mainReason"]]
+            coverage = dict(withMainReasonSkuCount=len(with_reason), missingMainReasonSkuCount=len(without_reason),
+                            withMainReasonReturned=sum(r["returned"] for r in with_reason),
+                            withoutMainReasonReturned=sum(r["returned"] for r in without_reason),
+                            note="主因覆盖仅表示对应尺码有主因资料，不是完整原因分布；未核实原因保留空白。")
+            metadata = {key: report[key] for key in ("sid", "basis", "channel", "source", "capturedAtISO",
+                        "salesEnd", "days", "startDate", "endDate", "sourceTotal", "pages")}
+            metadata.update(basisLabel="FBA退货双数 ÷ FBA普通售出双数", rateUnit="ratio",
+                            definition="按领星订单利润报表日期口径，FBA退货双数 ÷ FBA普通售出双数。只统计软件已跟踪款式；FBM和退款不计入FBA退货，换货不计入普通售出。款式和颜色按合计双数计算比例。",
+                            caveat="近期订单的退货可能尚未完全回补，比例会随来源更新；当前比例不代表最终退货率。没有可计算的销量时显示—。",
+                            style=style)
+            if previous_report is not None:
+                metadata.update(previousStartDate=previous_report["startDate"], previousEndDate=previous_report["endDate"],
+                                previousSourceTotal=previous_report["sourceTotal"], previousPages=previous_report["pages"])
+            return dict(available=True, metadata=metadata, summary=self._return_totals(selected),
+                        styles=styles, colors=colors, rows=selected, reasonCoverage=coverage)
 
     def import_snapshot(self, document):
         if not isinstance(document, dict) or not isinstance(document.get("rows"), list) or not document["rows"]:
@@ -704,6 +958,48 @@ class Store:
             self._audit(conn, "plan.confirm", plan_id, before, plan)
             return purchase
 
+    def update_purchase_logistics(self, purchase_id, payload):
+        """Record a forwarder handoff/forecast without asserting actual dispatch."""
+        fields = {"forwarder_handoff_confirmed", "forwarder_reported_date",
+                  "forwarder_note", "expected_ship_date"}
+        if not isinstance(payload, dict) or not fields.intersection(payload):
+            raise AppError("请提供本批交货代或预计发货资料")
+        if set(payload) - fields - {"revision"}:
+            raise AppError("物流资料只能修改交货代确认、报告日期、备注和预计发货日期")
+        changes = {}
+        if "forwarder_handoff_confirmed" in payload:
+            value = payload["forwarder_handoff_confirmed"]
+            if not isinstance(value, bool):
+                raise AppError("交货代确认必须是true或false")
+            changes["forwarder_handoff_confirmed"] = value
+        if "forwarder_reported_date" in payload:
+            reported = iso_date(payload["forwarder_reported_date"], "交货代报告日期", optional=True)
+            if reported and reported > datetime.now(timezone(timedelta(hours=8))).date().isoformat():
+                raise AppError("报告日期不能晚于北京时间今天；预计发出日期请另填")
+            changes["forwarder_reported_date"] = reported
+        if "forwarder_note" in payload:
+            changes["forwarder_note"] = text_value(payload["forwarder_note"], "交货代说明", limit=2000)
+        if "expected_ship_date" in payload:
+            changes["expected_ship_date"] = iso_date(payload["expected_ship_date"], "预计发货日期", optional=True)
+        with self.connection(write=True) as conn:
+            purchase = self._get(conn, "purchase", purchase_id)
+            require_revision(payload, purchase)
+            if purchase.get("status") == "cancelled":
+                raise AppError("该采购登记已取消", 409, "cancelled_purchase")
+            if purchase.get("reconciled_snapshot_id"):
+                raise AppError("已完成库存核对的批次不能再修改待发物流资料", 409, "reconciled_purchase")
+            if purchase.get("shipment_archived_at"):
+                raise AppError("已核实整批发出的历史批次不能再修改待发物流资料", 409, "archived_purchase")
+            ship_date = changes.get("expected_ship_date", purchase.get("expected_ship_date"))
+            available_date = purchase.get("expected_available_date")
+            if ship_date and available_date and available_date < ship_date:
+                raise AppError("预计可售日期不能早于预计发货日期，请先核对现有预计可售日期")
+            before = copy(purchase)
+            purchase.update(changes, revision=purchase["revision"] + 1, updated_at=now())
+            self._put(conn, "purchase", purchase_id, purchase)
+            self._audit(conn, "purchase.logistics.update", purchase_id, before, purchase)
+            return purchase
+
     def purchase_event(self, purchase_id, payload):
         event_id = text_value(payload.get("event_id"), "事件编号", required=True, limit=200)
         event_type = payload.get("type")
@@ -833,6 +1129,84 @@ class Store:
             self._audit(conn, "plan.cancel", plan["id"], prior_plan, plan)
             return purchase
 
+    def auto_match_inbound(self, before_snapshot_id, after_snapshot_id):
+        """Match exact, unambiguous per-SKU increases in consecutive Lingxing stock snapshots.
+
+        This is a system-inbound observation, not a carrier shipment ID or actual departure date.
+        Partial or overlapping purchases remain pending. One observation cannot be reused.
+        """
+        before_snapshot_id = text_value(before_snapshot_id, "前一库存快照", required=True, limit=200)
+        after_snapshot_id = text_value(after_snapshot_id, "当前库存快照", required=True, limit=200)
+        with self.connection(write=True) as conn:
+            old = conn.execute("SELECT seq,document FROM snapshots WHERE id=?", (before_snapshot_id,)).fetchone()
+            new = conn.execute("SELECT seq,document FROM snapshots WHERE id=?", (after_snapshot_id,)).fetchone()
+            previous_seq = conn.execute("SELECT MAX(seq) FROM snapshots WHERE seq < ?", (new[0],)).fetchone()[0] if new else None
+            if not old or not new or old[0] != previous_seq or self._snapshot(conn)[0] != after_snapshot_id:
+                raise AppError("请使用按时间排序且当前有效的两份库存快照", 409, "snapshot_conflict")
+            earlier, later = json.loads(old[1]), json.loads(new[1])
+            try:
+                old_time = datetime.fromisoformat(earlier["inventoryCapturedAtISO"].replace("Z", "+00:00"))
+                new_time = datetime.fromisoformat(later["inventoryCapturedAtISO"].replace("Z", "+00:00"))
+                if old_time.tzinfo is None or new_time.tzinfo is None or old_time >= new_time:
+                    raise ValueError()
+            except (KeyError, TypeError, ValueError):
+                raise AppError("库存快照采集时间不完整或未按时间排序") from None
+            old_rows = {r["sku"]: r for r in earlier["rows"]}
+            new_rows = {r["sku"]: r for r in later["rows"]}
+            purchases = self._list(conn, "purchase")
+            active = [p for p in purchases if p.get("status") != "cancelled" and not p.get("shipment_archived_at") and not p.get("reconciled_snapshot_id")]
+            owners = {}
+            for p in active:
+                for line in p.get("lines", []):
+                    if line.get("ordered", 0) > line.get("system_shipped", 0):
+                        owners.setdefault(line["sku"], set()).add(p["id"])
+            used = set()
+            for p in purchases:
+                for match in p.get("inbound_matches", []):
+                    if match.get("before_snapshot_id") == before_snapshot_id and match.get("after_snapshot_id") == after_snapshot_id:
+                        used.update(line["sku"] for line in match.get("lines", []))
+            matched, skipped = [], []
+            for purchase in active:
+                lines = purchase.get("lines", [])
+                try:
+                    created = datetime.fromisoformat(purchase["created_at"].replace("Z", "+00:00"))
+                    eligible = bool(lines) and (created <= old_time or
+                        (purchase.get("source_snapshot_id") == before_snapshot_id and created <= new_time))
+                except (KeyError, TypeError, ValueError):
+                    eligible = False
+                changes = []
+                for line in lines:
+                    sku = line["sku"]
+                    old_row, new_row = old_rows.get(sku), new_rows.get(sku)
+                    old_inv = old_row.get("inventory", {}) if old_row else {}
+                    new_inv = new_row.get("inventory", {}) if new_row else {}
+                    previous, current = old_inv.get("afn_inbound_shipped_quantity"), new_inv.get("afn_inbound_shipped_quantity")
+                    qty = line.get("ordered")
+                    if (not eligible or not old_row or not new_row or not old_row.get("inventoryKnown") or not new_row.get("inventoryKnown")
+                            or not number(previous) or not number(current) or not number(qty) or qty <= 0
+                            or current - previous != qty or line.get("shipped", 0) or line.get("system_shipped", 0)
+                            or len(owners.get(sku, set())) != 1 or sku in used):
+                        eligible = False
+                        break
+                    changes.append(dict(sku=sku, quantity=qty, before=previous, after=current))
+                if not eligible:
+                    skipped.append(purchase["id"])
+                    continue
+                prior = copy(purchase)
+                observed = new_time.astimezone(timezone.utc).isoformat()
+                match = dict(before_snapshot_id=before_snapshot_id, after_snapshot_id=after_snapshot_id,
+                             observed_at=observed, first_observed_date=new_time.astimezone(timezone(timedelta(hours=8))).date().isoformat(),
+                             basis="领星已发在途逐码增量与本批配码完全一致；非货件号或实际发货日期", lines=changes)
+                for line in lines:
+                    line.update(system_shipped=line["ordered"], shipped=line["ordered"])
+                    used.add(line["sku"])
+                purchase.setdefault("inbound_matches", []).append(match)
+                purchase.update(status="shipped", shipment_archived_at=now(), revision=purchase["revision"]+1, updated_at=now())
+                self._put(conn, "purchase", purchase["id"], purchase)
+                self._audit(conn, "purchase.lingxing-inbound-match", purchase["id"], prior, purchase)
+                matched.append(dict(id=purchase["id"], style=purchase["style"], quantity=sum(l["quantity"] for l in changes)))
+            return dict(matched=matched, skipped=skipped, before_snapshot_id=before_snapshot_id, after_snapshot_id=after_snapshot_id)
+
     def match_lingxing_shipment(self, purchase_id, payload):
         """Allocate verified external shipment units once; never infer from old inbound totals."""
         match_id = text_value(payload.get("match_id"), "核对编号", required=True, limit=200)
@@ -846,7 +1220,7 @@ class Store:
         if not expected_sid:
             raise AppError("请先在本机设置REPLENISHMENT_LINGXING_SID店铺配置，再核对货件")
         if proof.get("source") != "lingxing" or str(proof.get("sid")) != expected_sid or proof.get("dispatch_confirmed") is not True:
-            raise AppError("凭据必须确认指定店铺领星货件已实际发货，库存总在途不能作为批次凭据")
+            raise AppError("凭据必须确认领星货件已实际发货，库存总在途不能作为批次凭据")
         shipment_id = text_value(proof.get("shipment_id"), "领星货件编号", required=True, limit=200)
         observed = text_value(proof.get("observed_at"), "领星核实时刻", required=True)
         try:

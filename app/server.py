@@ -106,6 +106,12 @@ def make_handler(store, token, static_dir):
                     return self.json_response(store.recommend(query.get("style", [None])[0], days))
                 if path == "/api/audit":
                     return self.json_response(store.audit())
+                if path == "/api/returns":
+                    try:
+                        days = int(query.get("days", ["28"])[0])
+                    except ValueError:
+                        raise AppError("退货窗口天数无效") from None
+                    return self.json_response(store.returns(days, query.get("style", [None])[0]))
                 if len(parts) == 4 and parts[:2] == ["api", "plans"] and parts[3] == "export.csv":
                     return self.send_bytes(store.export_csv(parts[2]), content_type="text/csv; charset=utf-8",
                                            extra={"Content-Disposition": f'attachment; filename="{parts[2]}.csv"'})
@@ -133,6 +139,8 @@ def make_handler(store, token, static_dir):
                     return self.json_response(store.backup(), 201)
                 if path == "/api/snapshots":
                     return self.json_response(store.import_snapshot(payload.get("document")))
+                if path == "/api/returns":
+                    return self.json_response(store.import_returns(payload.get("document")))
                 if len(parts) == 4 and parts[:2] == ["api", "plans"]:
                     if parts[3] == "adopt":
                         return self.json_response(store.adopt_plan(parts[2], payload))
@@ -147,6 +155,9 @@ def make_handler(store, token, static_dir):
                         return self.json_response(store.purchase_event(parts[2], payload))
                     if parts[3] == "reconcile":
                         return self.json_response(store.reconcile_purchase(parts[2], payload))
+            if (self.command == "PUT" and len(parts) == 4
+                    and parts[:2] == ["api", "purchases"] and parts[3] == "logistics"):
+                return self.json_response(store.update_purchase_logistics(parts[2], payload))
             if self.command == "PUT" and len(parts) == 3:
                 if parts[:2] == ["api", "plans"]:
                     return self.json_response(store.update_plan(parts[2], payload))

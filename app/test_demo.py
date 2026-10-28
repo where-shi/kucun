@@ -1,6 +1,7 @@
 """Synthetic fixtures only. Every database lives in an isolated temporary folder."""
 import copy
 import csv
+from datetime import date, timedelta
 import io
 import json
 import os
@@ -35,6 +36,37 @@ class DemoTests(unittest.TestCase):
         plan = self.store.create_plan({"style": STYLE})
         return self.store.update_plan(plan["id"], {"revision": plan["revision"], "lines": [
             {"sku": sku, "quantity": quantity} for sku, quantity in quantities.items()]})
+
+    def test_color_images_only_serve_associated_files(self):
+        directory = self.root / "product-images"
+        directory.mkdir()
+        (directory / "blue.jpg").write_bytes(b"test image")
+        (directory / "other.jpg").write_bytes(b"test image")
+        pref = self.store.bootstrap()["style_preferences"][STYLE]
+        updated = self.store.update_style_preference(STYLE, {"revision": pref["revision"],
+            "color_images": {"Blue": {"path": "/product-images/blue.jpg", "source": "demo"}}})
+        self.assertEqual(self.store.product_image_path("/product-images/blue.jpg").name, "blue.jpg")
+        with self.assertRaises(AppError):
+            self.store.product_image_path("/product-images/other.jpg")
+        with self.assertRaises(AppError):
+            self.store.update_style_preference(STYLE, {"revision": updated["revision"],
+                "color_images": {"Unknown": {"path": "/product-images/blue.jpg", "source": "demo"}}})
+
+    def test_returns_require_configured_store_and_keep_fba_counts(self):
+        end = date(2025, 1, 30)
+        document = {"schemaVersion": 1, "sid": 123, "basis": "period_fba", "channel": "FBA",
+                    "source": "synthetic", "salesEnd": end.isoformat(), "capturedAtISO": "2025-02-01T12:00:00+00:00",
+                    "reports": [{"days": days, "startDate": (end-timedelta(days=days-1)).isoformat(),
+                      "endDate": end.isoformat(), "sourceTotal": 1, "pages": [1],
+                      "rows": [{"sku": SKU, "sid": 123, "sold": 10, "returned": 2, "fbaReturned": 2}]}
+                      for days in (7, 28, 90)]}
+        with patch.dict(os.environ, {"REPLENISHMENT_LINGXING_SID": "999"}):
+            with self.assertRaises(AppError): self.store.import_returns(document)
+        with patch.dict(os.environ, {"REPLENISHMENT_LINGXING_SID": "123"}):
+            self.assertTrue(self.store.import_returns(document)["imported"])
+            result = self.store.returns(28, STYLE)
+            row = next(item for item in result["rows"] if item["sku"] == SKU)
+            self.assertEqual((row["sold"], row["returned"]), (10, 2))
 
     def buy(self, quantities):
         plan = self.plan(quantities)
