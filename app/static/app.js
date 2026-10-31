@@ -68,6 +68,7 @@ function updateMatrixSelection() {
   document.querySelectorAll("[data-matrix-selection-count]").forEach(element=>element.textContent=count);
   document.querySelectorAll('[data-batch-quantity],[data-action="apply-batch-quantity"],[data-action="clear-matrix-selection"]').forEach(element=>element.disabled=!count);
   const input=$("[data-batch-quantity]");
+  if(input)delete input.dataset.keyboardBatch;
   if(input&&!count){input.value="";input.setCustomValidity("");}
   const error=$("[data-batch-error]");if(error){error.hidden=true;error.textContent="";}
 }
@@ -112,6 +113,8 @@ function priceTiers(style=state.style,useEdits=false) {
   return (stylePreference(style).purchase_price_tiers || []).map((tier,index)=>({...tier,unit_cny:Object.hasOwn(edits,index)?edits[index]:tier.unit_cny}));
 }
 function rowPriceCents(row,style,useEdits=false) {
+  const colorPrices=stylePreference(style).purchase_color_prices || {};
+  if(Object.keys(colorPrices).length){const edits=useEdits?(state.tierPriceEdits[style] || {}):{};const key=`color:${row?.color}`;return priceCents(Object.hasOwn(edits,key)?edits[key]:colorPrices[row?.color]);}
   const tiers=priceTiers(style,useEdits);
   if(tiers.length){const cn=Number(row?.cnSize);const tier=row?.cnSize!=null?tiers.find(t=>cn>=t.cn_min&&cn<=t.cn_max):null;return tier?priceCents(tier.unit_cny):null;}
   return priceCents(useEdits?priceValue(style):stylePreference(style).purchase_unit_cny);
@@ -119,10 +122,13 @@ function rowPriceCents(row,style,useEdits=false) {
 function linesCost(lines,style,useEdits=false) {
   const bySku=new Map(rows().map(row=>[row.sku,row]));let total=0,missing=0;
   for(const line of lines){const cents=rowPriceCents(bySku.get(line.sku),style,useEdits);if(cents===null)missing+=line.quantity;else total+=line.quantity*cents;}
-  return {total,missing};
+  const freight=sum(lines,"quantity")>0?(priceCents(stylePreference(style).purchase_batch_freight_cny) || 0):0;
+  return {total:total+freight,missing,freight};
 }
 function priceSummary(style) {
   const tiers=priceTiers(style);const pref=stylePreference(style);
+  const colors=Object.values(pref.purchase_color_prices || {}).map(priceCents).filter(c=>c!==null);
+  if(colors.length)return `按颜色 ${money(Math.min(...colors))}–${money(Math.max(...colors))}`;
   const known=tiers.length?tiers.map(t=>priceCents(t.unit_cny)).filter(c=>c!==null):[priceCents(pref.purchase_unit_cny)].filter(c=>c!==null);
   if(!known.length)return "待填";
   const min=Math.min(...known),max=Math.max(...known);
@@ -131,20 +137,21 @@ function priceSummary(style) {
 function currentCostText() {
   const invalid=state.invalid[editKey()] || {};
   const lines=mergedLines().filter(line=>!Object.hasOwn(invalid,line.sku));const cost=linesCost(lines,state.style,true);
-  if(!sum(lines,"quantity")&&priceCents(priceValue())===null&&!priceTiers().length)return "填入单价后核算";
-  return `${cost.missing?"已知部分 ":""}${money(cost.total)}${cost.missing?`（另有${cost.missing}双缺单价）`:""}${Object.keys(invalid).length?"（部分数量未填完整）":""}`;
+  if(!sum(lines,"quantity")&&priceCents(priceValue())===null&&!priceTiers().length&&!Object.keys(stylePreference().purchase_color_prices || {}).length)return "填入单价后核算";
+  return `${cost.missing?"已知部分 ":""}${money(cost.total)}${cost.freight?`（含预估邮费 ${money(cost.freight)}）`:""}${cost.missing?`（另有${cost.missing}双缺单价）`:""}${Object.keys(invalid).length?"（部分数量未填完整）":""}`;
 }
 function renderCurrentCost() {
   const preference=stylePreference();const tiers=priceTiers(state.style,true);const included=preference.purchase_price_includes_domestic_freight;
-  const inputs=tiers.length?tiers.map((tier,index)=>`<label>中国码 ${tier.cn_min}–${tier.cn_max}（元 / 双${included?"，含国内运费":""}）<input type="number" min="0" max="100000" step="0.01" data-price-tier="${index}" value="${esc(tier.unit_cny ?? "")}" placeholder="单价未知"></label>`).join(""):`<label>参考采购单价（元 / 双）<input type="number" min="0" max="100000" step="0.01" data-purchase-price="${esc(state.style)}" value="${esc(priceValue())}" placeholder="单价未知"></label>`;
-  return `<section class="purchase-cost-card" aria-label="本款货款估算"><div><span>本款预计采购金额${included?" · 已含国内运费":""}</span><strong data-current-cost>${esc(currentCostText())}</strong><small>按这次已填写数量计算 · 改双数会同步更新</small></div><div class="cost-price-entry">${inputs}<button type="button" class="small" data-action="save-price">保存单价</button></div><p>${esc(preference.purchase_price_note || "单价尚未记录，可自行填写。")}${preference.purchase_price_date?` · ${esc(preference.purchase_price_date)}`:""}</p><small>${included?"国内运费已并入上述采购价，金额不再另加运费；未含发往FBA的头程等额外费用。":"人民币采购金额估算；单价已含费用以记录为准，未含运费、额外包装和头程等另计。"}</small></section>`;
+  const colorPrices=preference.purchase_color_prices || {};const priceEdits=state.tierPriceEdits[state.style] || {};
+  const inputs=Object.keys(colorPrices).length?Object.entries(colorPrices).map(([color,value])=>`<label>${esc(styleRows().find(row=>row.color===color)?.colorLabel || color)}（元 / 双）<input type="number" min="0" max="100000" step="0.01" data-color-price="${esc(color)}" value="${esc(Object.hasOwn(priceEdits,`color:${color}`)?priceEdits[`color:${color}`]:value ?? "")}"></label>`).join(""):tiers.length?tiers.map((tier,index)=>`<label>中国码 ${tier.cn_min}–${tier.cn_max}（元 / 双${included?"，含国内运费":""}）<input type="number" min="0" max="100000" step="0.01" data-price-tier="${index}" value="${esc(tier.unit_cny ?? "")}" placeholder="单价未知"></label>`).join(""):`<label>参考采购单价（元 / 双）<input type="number" min="0" max="100000" step="0.01" data-purchase-price="${esc(state.style)}" value="${esc(priceValue())}" placeholder="单价未知"></label>`;
+  return `<section class="purchase-cost-card" aria-label="本款货款估算"><div><span>本款预计采购金额${included?" · 已含国内运费":""}</span><strong data-current-cost>${esc(currentCostText())}</strong><small>按这次已填写数量计算 · 改双数会同步更新</small></div><div class="cost-price-entry">${inputs}<button type="button" class="small" data-action="save-price">保存单价</button></div><p>${esc(preference.purchase_price_note || "单价尚未记录，可自行填写。")}${preference.purchase_price_date?` · ${esc(preference.purchase_price_date)}`:""}</p><small>${included?"国内运费已并入上述采购价，金额不再另加运费；未含发往FBA的头程等额外费用。":preference.purchase_batch_freight_cny!=null?`填入数量后，国内邮费每批预估 ${money(priceCents(preference.purchase_batch_freight_cny))}，已加入合计一次；实际邮费以厂家为准。头程等额外费用另计。`:"人民币采购金额估算；单价已含费用以记录为准，未含运费、额外包装和头程等另计。"}</small></section>`;
 }
 function renderBatchCost() {
   const latest=new Map();
   [...(state.data.plans || [])].filter(p=>p.status==="draft").sort((a,b)=>String(b.updated_at).localeCompare(String(a.updated_at))).forEach(p=>{if(!latest.has(p.style))latest.set(p.style,p);});
   const selected=[...latest.values()].filter(p=>sum(p.lines,"quantity")>0);
   let total=0,quantity=0,missing=0;
-  const body=selected.map(p=>{const qty=sum(p.lines,"quantity");const cost=linesCost(p.lines,p.style);quantity+=qty;missing+=cost.missing;total+=cost.total;return `<tr><td>${esc(styleName(p.style))}</td><td>${qty} 双</td><td>${esc(priceSummary(p.style))}${stylePreference(p.style).purchase_price_includes_domestic_freight?'<small class="muted"> 已含国内运费</small>':""}</td><td>${cost.missing===qty?"待核算":`${money(cost.total)}${cost.missing?`（${cost.missing}双待计）`:""}`}</td><td><button class="small" data-plan="${esc(p.id)}">查看方案</button></td></tr>`;}).join("");
+  const body=selected.map(p=>{const qty=sum(p.lines,"quantity");const cost=linesCost(p.lines,p.style);quantity+=qty;missing+=cost.missing;total+=cost.total;return `<tr><td>${esc(styleName(p.style))}</td><td>${qty} 双</td><td>${esc(priceSummary(p.style))}${stylePreference(p.style).purchase_price_includes_domestic_freight?'<small class="muted"> 已含国内运费</small>':""}</td><td>${cost.missing===qty?"待核算":`${money(cost.total)}${cost.freight?`（含预估邮费 ${money(cost.freight)}）`:""}${cost.missing?`（${cost.missing}双待计）`:""}`}</td><td><button class="small" data-plan="${esc(p.id)}">查看方案</button></td></tr>`;}).join("");
   return `<section class="panel batch-cost" aria-label="这批鞋货款核算"><div class="heading"><div><h2>这批鞋，大概要多少钱</h2><p class="muted">每款取最近保存的一份补货草稿，未填数量不计；同款其他方案不重复加。</p></div><div class="batch-cost-total"><span>${missing?"已知单价部分货款":"预计采购货款"}</span><strong>${money(total)}</strong><small>${quantity} 双 · ${selected.length} 款${missing?` · 另有 ${missing} 双缺单价，尚未计入`:""}</small></div></div>${selected.length?`<div class="table-wrap"><table class="data-table"><thead><tr><th>款式</th><th>本次双数</th><th>参考单价 / 双</th><th>预计货款</th><th></th></tr></thead><tbody>${body}</tbody></table></div>`:'<p class="muted">先保存补货数量，这里就会合计。</p>'}<p class="muted">按已保存数量和参考单价估算人民币货款，不代表已下单。单价已含费用按各款记录计入，不重复加；未含的头程等额外费用另计。可回到尺码页修改单价。${dirty()?"当前另有未保存修改，保存后再看此合计。":""}</p></section>`;
 }
 const firstShipmentOnly = () => !!styleRec()?.evaluated.length && styleRec().evaluated.every(item=>item.result.status==="planned");
@@ -849,7 +856,8 @@ document.addEventListener("click",event=>{
   if(type==="save-price"){action(async()=>{
     const preference=stylePreference();const tiers=priceTiers(state.style,true);
     const payload={revision:preference.revision,purchase_price_note:`你在补货软件中手动填写的${tiers.length?"分尺码":"参考"}采购价${preference.purchase_price_includes_domestic_freight?"；已含国内运费，不再另加":"；费用包含范围待按报价核对"}`,purchase_price_date:localToday()};
-    if(tiers.length){payload.purchase_price_tiers=tiers.map(t=>{const cents=priceCents(t.unit_cny);if(t.unit_cny!==""&&t.unit_cny!==null&&cents===null)throw new Error("采购单价请填0至100000元，最多两位小数。");return {...t,unit_cny:cents===null?null:cents/100};});}
+    if(Object.keys(preference.purchase_color_prices || {}).length){payload.purchase_color_prices=Object.fromEntries(Object.entries(preference.purchase_color_prices).map(([color,old])=>{const e=state.tierPriceEdits[state.style] || {};const value=Object.hasOwn(e,`color:${color}`)?e[`color:${color}`]:old;const cents=priceCents(value);if(value!==""&&value!==null&&cents===null)throw new Error("采购单价请填0至100000元，最多两位小数。");return [color,cents===null?null:cents/100];}));payload.purchase_price_note=preference.purchase_price_note || "分颜色采购参考价";}
+    else if(tiers.length){payload.purchase_price_tiers=tiers.map(t=>{const cents=priceCents(t.unit_cny);if(t.unit_cny!==""&&t.unit_cny!==null&&cents===null)throw new Error("采购单价请填0至100000元，最多两位小数。");return {...t,unit_cny:cents===null?null:cents/100};});}
     else {const value=priceValue();const cents=priceCents(value);if(value!==""&&cents===null)throw new Error("采购单价请填0至100000元，最多两位小数。");payload.purchase_unit_cny=value===""?null:cents/100;}
     const result=await write(`/api/styles/${encodeURIComponent(state.style)}`,"PUT",payload);
     state.data.style_preferences[state.style]=result;delete state.priceEdits[state.style];delete state.tierPriceEdits[state.style];render();if($("#modal").open&&$("#plan-options-title"))planOptionsModal();notify("采购单价已保存，金额按各尺码数量自动核算。");
@@ -859,6 +867,20 @@ document.addEventListener("click",event=>{
   if(type==="refresh"){action(async()=>{await bootstrap();notify("已读取本地最新保存内容，未存手改仍保留；业务来源快照日期见顶部。");});}
 });
 document.addEventListener("keydown",event=>{
+  const target=event.target;
+  const typingInControl=target.closest?.("input,textarea,select,[contenteditable='true']");
+  const allowedTarget=target===document.body||target===document.documentElement||target.closest?.(".matrix [data-sku]");
+  if(/^[0-9]$/.test(event.key)&&!event.ctrlKey&&!event.metaKey&&!event.altKey&&!event.isComposing&&!state.busy&&!$("#modal").open&&!typingInControl&&allowedTarget&&canBatchFill()&&(state.sku||matrixSelection.skus.size)){
+    const batch=matrixSelection.skus.size>0;
+    const input=batch?$("[data-batch-quantity]"):document.querySelector("#sku-advice [data-quantity]");
+    if(input&&!input.disabled){
+      event.preventDefault();
+      if(batch)input.dataset.keyboardBatch="true";
+      input.focus({preventScroll:true});input.value=event.key;
+      input.dispatchEvent(new Event("input",{bubbles:true}));
+      return;
+    }
+  }
   if(event.key==="Escape"&&!$("#modal").open){
     const menu=document.querySelector(".nav-more[open]");
     if(menu){menu.removeAttribute("open");menu.querySelector("summary").focus();return;}
@@ -868,12 +890,32 @@ document.addEventListener("keydown",event=>{
 });
 document.addEventListener("input",event=>{
   const input=event.target;
-  if(input.matches?.("[data-batch-quantity]")){matrixSelection.quantity=input.value;input.setCustomValidity("");const error=$("[data-batch-error]");if(error)error.hidden=true;return;}
+  if(input.matches?.("[data-batch-quantity]")){
+    matrixSelection.quantity=input.value;input.setCustomValidity("");const error=$("[data-batch-error]");if(error)error.hidden=true;
+    if(input.dataset.keyboardBatch==="true"&&canBatchFill()&&matrixSelection.skus.size&&input.value!==""){
+      const quantity=Number(input.value);
+      if(Number.isSafeInteger(quantity)&&quantity>=0&&quantity<=1000000){
+        const valid=new Set(styleRows().map(row=>row.sku));
+        for(const sku of matrixSelection.skus){
+          if(!valid.has(sku))continue;
+          edits()[sku]={quantity,manual:true,note:chosen(sku)?.note || ""};
+          delete (state.invalid[editKey()] || {})[sku];updatePlanGrid(sku,quantity);
+        }
+        document.querySelectorAll("[data-quantity]").forEach(other=>{if(matrixSelection.skus.has(other.dataset.quantity))other.value=quantity;});
+        if($("#plan-total"))$("#plan-total").textContent=sum(mergedLines(),"quantity");
+        document.querySelectorAll("[data-draft-total]").forEach(element=>element.textContent=sum(mergedLines(),"quantity"));
+        if($("#moq-note"))$("#moq-note").innerHTML=moqNote();
+        document.querySelectorAll("[data-current-cost]").forEach(el=>el.textContent=currentCostText());updateSaveState();
+      }
+    }
+    return;
+  }
   if(input.dataset.priceTier!==undefined){const edits=state.tierPriceEdits[state.style] || (state.tierPriceEdits[state.style]={});edits[input.dataset.priceTier]=input.value;document.querySelectorAll("[data-current-cost]").forEach(el=>el.textContent=currentCostText());updateSaveState();return;}
+  if(input.dataset.colorPrice!==undefined){const edits=state.tierPriceEdits[state.style] || (state.tierPriceEdits[state.style]={});edits[`color:${input.dataset.colorPrice}`]=input.value;document.querySelectorAll("[data-current-cost]").forEach(el=>el.textContent=currentCostText());updateSaveState();return;}
   if(input.dataset.purchasePrice){state.priceEdits[input.dataset.purchasePrice]=input.value;document.querySelectorAll("[data-current-cost]").forEach(el=>el.textContent=currentCostText());updateSaveState();return;}
   if(input.id==="return-style-search"){returnState.search=input.value;document.querySelectorAll(".returns-sidebar .style-button").forEach(button=>{button.hidden=!button.dataset.returnSearch.includes(input.value.toLowerCase());});return;}
   if(input.id==="style-search"){
-    state.search=input.value;document.querySelectorAll(".style-button").forEach(button=>{button.hidden=!button.dataset.search.includes(input.value.toLowerCase());});return;
+    state.search=input.value;document.querySelectorAll(".style-sidebar .style-button[data-style]").forEach(button=>{button.hidden=!button.dataset.search.includes(input.value.toLowerCase());button.draggable=!input.value;});return;
   }
   if(input.dataset.quantity){
     if(!editable())return;
@@ -923,7 +965,13 @@ document.addEventListener("submit",event=>{
       const current=plan();const body={revision:current.revision,confirmed:true,reference:values.reference.trim()};
       for(const field of ["expected_ship_date","expected_available_date"])if(values[field])body[field]=values[field];
       const result=await write(`/api/plans/${encodeURIComponent(current.id)}/confirm`,"POST",body);
-      putPurchase(result);closeModal();state.page="matrix";state.view="purchased";state.purchaseBatchId=result.id;state.sku=result.lines[0]?.sku || null;await bootstrap();notify("已确认采购，已切换到“已采购”格子；发货由领星逐批核实。");
+      putPurchase(result);
+      const confirmedIndex=state.data.plans.findIndex(item=>item.id===current.id);
+      if(confirmedIndex>=0)state.data.plans[confirmedIndex]={...current,status:"confirmed",revision:current.revision+1,purchase_id:result.id};
+      delete state.edits[current.id];delete state.invalid[current.id];delete state.dayEdits[current.id];
+      pickDefaultPlan();closeModal();state.page="matrix";state.view="purchased";state.purchaseBatchId=result.id;state.sku=result.lines[0]?.sku || null;render();
+      try{await bootstrap(true);notify("已确认采购，补货方案已更新。");}
+      catch(error){render();alertError(`采购已确认，但重新读取资料失败：${error.message || "请稍后重试"}。请点“刷新本地数据”，不要重复确认采购。`);}
     }else if(form.id==="event-form"){
       const item=purchase();const lines=[...form.querySelectorAll("[data-event-sku]")].filter(input=>input.value!==""&&Number(input.value)>0).map(input=>({sku:input.dataset.eventSku,quantity:Number(input.value)}));
       if(!lines.length)throw new Error("请至少填写一个尺码本次实际发生的数量。");

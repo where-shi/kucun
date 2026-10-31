@@ -74,6 +74,10 @@ def order_multiple(row):
 
 def purchase_unit_cents(row, preference):
     """Resolve a size-specific quote before the style default; unknown stays unknown."""
+    color_prices = preference.get("purchase_color_prices") or {}
+    if color_prices:
+        price = color_prices.get(row.get("color"))
+        return round(price * 100) if price is not None else None
     tiers = preference.get("purchase_price_tiers") or []
     if tiers:
         try:
@@ -412,6 +416,15 @@ class Store:
                 if price is not None and (not number(price) or not 0 <= price <= 100000 or abs(price * 100 - round(price * 100)) > 1e-7):
                     raise AppError("采购单价须为0至100000元、最多两位小数；未知请留空")
                 record["purchase_unit_cny"] = price
+            if "purchase_color_prices" in payload:
+                prices = payload["purchase_color_prices"]
+                colors = {row["color"] for row in self._style_rows(conn, style)}
+                if not isinstance(prices, dict) or not set(prices).issubset(colors):
+                    raise AppError("分颜色采购价必须对应本款已有颜色")
+                for price in prices.values():
+                    if price is not None and (not number(price) or not 0 <= price <= 100000 or abs(price * 100 - round(price * 100)) > 1e-7):
+                        raise AppError("分颜色采购价须为0至100000元、最多两位小数")
+                record["purchase_color_prices"] = copy(prices)
             if "purchase_price_tiers" in payload:
                 tiers = payload["purchase_price_tiers"]
                 if not isinstance(tiers, list) or len(tiers) > 50:
@@ -430,6 +443,11 @@ class Store:
                 if any(a["cn_max"] >= b["cn_min"] for a, b in zip(validated, validated[1:])):
                     raise AppError("分尺码价格区间不能重叠")
                 record["purchase_price_tiers"] = validated
+            if "purchase_batch_freight_cny" in payload:
+                freight = payload["purchase_batch_freight_cny"]
+                if freight is not None and (not number(freight) or not 0 <= freight <= 100000 or abs(freight * 100 - round(freight * 100)) > 1e-7):
+                    raise AppError("每批预估运费须为0至100000元、最多两位小数")
+                record["purchase_batch_freight_cny"] = freight
             if "purchase_price_includes_domestic_freight" in payload:
                 if not isinstance(payload["purchase_price_includes_domestic_freight"], bool):
                     raise AppError("是否已含国内运费必须为true或false")
