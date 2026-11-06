@@ -192,7 +192,7 @@ def recommend_row(row, days=35):
                 reason=f"按近期销量参考{days}天需求约{target}双，现货{stock:g}双，初步可考虑补{gap:g}双{rounding}。{low_sample}尚未计入等新货期间的消耗。")
 
 
-def planning_recommendation(row, days=35, transit_days=30):
+def planning_recommendation(row, days=35, transit_days=30, history=None, return_risk=None, unit_cost_cents=None, winter_signal=None):
     """Decision for review: demand through lead time + cover, less distinct source supply.
 
     The original prototype rule above remains available for historical comparison.
@@ -208,7 +208,21 @@ def planning_recommendation(row, days=35, transit_days=30):
     supply_known = all(valid(inv.get(key)) for key in keys)
     pending = sum(inv[key] for key in keys) if supply_known else None
     sales_known = all(valid(row.get(key)) for key in ("n14", "n28"))
-    daily = max(row["n14"] / 14, row["n28"] / 28) if sales_known else None
+    valid_weekly = all(valid(row.get(key)) for key in ("n7", "p7"))
+    stable = sales_known and valid_weekly and row["n28"] >= 8 and min(row["n7"], row["p7"]) >= 3
+    daily = (max(row["n14"] / 14, row["n28"] / 28) if stable else row["n28"] / 28) if sales_known else None
+    daily_basis = "连续两周有较稳定销量，参考较快的14天或28天速度" if stable else "参考近28天平均销量，避免短期集中销量放大"
+    history = history or []
+    # A point-in-time zero is not proof of a full stockout. Prior snapshots with
+    # positive sellable stock only supply a bounded, explicitly labelled reference.
+    historical = [item for item in history if valid(item.get("stock")) and item["stock"] > 0
+                  and valid(item.get("n28")) and item["n28"] > 0]
+    historic_daily = max((item["n28"] / 28 for item in historical), default=0)
+    historical_reference = bool(daily is not None and historic_daily > daily and valid(stock)
+                                and stock < historic_daily * 7)
+    if historical_reference:
+        daily = historic_daily
+        daily_basis = "近期库存偏紧，参考近28天快照中有可售时的销量；不能确认每天都缺货"
     ceil = lambda value: math.ceil(value - 1e-9)
     target = ceil(daily * days) if daily is not None else None
     wait_demand = ceil(daily * transit_days) if daily is not None else None
@@ -217,6 +231,7 @@ def planning_recommendation(row, days=35, transit_days=30):
     result.update(daily=daily, target=target, gap=max(0, target-stock) if target is not None and valid(stock) else None,
                   pendingQuantity=pending, waitDemand=wait_demand, planningDemand=total_target,
                   coverDays=days, transitDays=transit_days, stockDays=stock_days,
+                  dailyBasis=daily_basis, historicalReference=historical_reference,
                   provisional=False, bridgeWarning=None,
                   assumption=f"按发出后约{transit_days}天到仓、到仓后覆盖{days}天估算；未额外计工厂生产等待时间。已有已发/接收/调仓/仓内处理中按此期间可用作计划，不承诺实际可售日。")
     if row.get("fbaReplenishmentMode") == "fbm_only":
@@ -235,21 +250,138 @@ def planning_recommendation(row, days=35, transit_days=30):
         if row.get("supplyStage") == "shipped" and pending > 0:
             return dict(result, quantity=0, status="observe", label="等货到仓", provisional=True,
                         reason=f"这一码已有{pending:g}双已发及仓内货，当前可售{stock:g}双。建议先跟这批到仓，之后看FBA销售再决定追加；不把暂时没有FBA销量当作不用发或淘汰的依据。")
+        if stock == 0:
+            return dict(result, quantity=None, status="defer", label="暂无建议", provisional=True,
+                        reason="近期销售依据不足，暂时无法给出补货数量。")
         return dict(result, quantity=0, status="observe", label="先卖现有货" if stock+pending>0 else "暂不补", provisional=True,
                     reason=f"建议暂不补：近14/28天未见FBA普通售出，已有现货{stock:g}双、已发及仓内货{pending:g}双，先观察销售。销量为0也可能受库存或刚到仓影响，不据此淘汰款式。")
     shortage = max(0, total_target-stock-pending)
+    # Advance only with consecutive dated snapshots showing an unmet need. A
+    # supply increase resets the stage; moving inbound to stock keeps its total.
+    stage_days = 0
+    current_date = None
+    try:
+        current_date = date.fromisoformat((row.get("inventoryCapturedAtISO") or "")[:10])
+    except ValueError:
+        pass
+    last_date, later_supply = current_date, stock + pending
+    if current_date and shortage > 0:
+        for item in history:
+            observed = item.get("date")
+            if not isinstance(observed, date) or observed >= current_date:
+                continue
+            if (last_date - observed).days > 2:
+                break
+            if not all(valid(item.get(k)) for k in ("stock", "pending", "n28")):
+                break
+            old_supply = item["stock"] + item["pending"]
+            if old_supply < later_supply or ceil(item["n28"] / 28 * (days + transit_days)) <= old_supply:
+                break
+            stage_days = (current_date - observed).days
+            last_date, later_supply = observed, old_supply
+    stage = min(2, stage_days // 7)
+    fraction = (0.6, 0.8, 1.0)[stage]
+    if stable:
+        fraction = max(fraction, 0.8)
+    if winter_signal:
+        fraction = 1.0
+    size = str(row.get("size", ""))
+    less_common = ((row.get("sizeSystem") == "US_MEN" and size in {"6", "7", "8", "12.5"}) or
+                   (row.get("sizeSystem") == "US_WOMEN" and size == "4.5"))
+    size_adjustment = less_common and row["n28"] < 8
+    staged = ceil(shortage * fraction * (0.8 if size_adjustment else 1))
+    # The report is a period ratio, not a mature cohort return rate; use a
+    # modest policy adjustment instead of subtracting the rate from demand.
+    return_adjusted = ceil(staged * 0.85) if return_risk and return_risk.get("eligible") else staged
+    # Low purchase price allows a small practical batch, only where a positive
+    # suggestion already exists. Never create demand or override return risk.
+    low_cost_batch = bool(return_adjusted > 0 and return_adjusted < 3 and
+                          number(unit_cost_cents) and 0 < unit_cost_cents <= 3500 and not return_risk)
+    batch_adjusted = max(3, return_adjusted) if low_cost_batch else return_adjusted
     multiple = order_multiple(row)
-    quantity = ceil(shortage/multiple)*multiple
+    quantity = ceil(batch_adjusted/multiple)*multiple
+    result.update(stageDays=stage_days, stageFraction=fraction, fullShortage=shortage,
+                  sizeAdjustment=size_adjustment, returnRisk=copy(return_risk),
+                  beforeReturnAdjustment=staged, lowCostBatch=low_cost_batch, winterSignal=copy(winter_signal),
+                  referenceUnitCostCny=unit_cost_cents / 100 if number(unit_cost_cents) else None)
     if stock < wait_demand:
         result["bridgeWarning"] = (f"现货约够{stock_days:g}天；若已有货到得较晚，等货期间可能缺货。优先跟进到货进度，新下单也不能直接解决眼前缺口。" if pending else
                                    f"现货约够{stock_days:g}天，短于约{transit_days}天运输期；新补货到仓前可能缺货。")
-    calculation = f"等货约卖{wait_demand}双，到仓后{days}天约卖{target}双；合并按日均销量估算共{total_target}双，减现货{stock:g}双、已发及仓内货{pending:g}双"
+    calculation = f"{daily_basis}；等货及到仓后共{transit_days+days}天估计需{total_target}双，减现货{stock:g}双、已发及仓内货{pending:g}双，完整参考缺口{shortage:g}双"
     if quantity > 0:
-        rounding = f"，按此款每码{multiple}双倍数取{quantity}双" if quantity != shortage else ""
+        rounding = f"，按此款每码{multiple}双倍数取整" if quantity != batch_adjusted else ""
+        size_note = "；该尺码销量样本较少，先少量参考" if size_adjustment else ""
+        cost_note = "；参考采购价较低，建议按3双起补" if low_cost_batch else ""
+        winter_note = (f"；冬季款已纳入补货的颜色中，近28天{winter_signal['active']}个颜色尺码有售出"
+                       f"（共{winter_signal['total']}个颜色尺码），按较积极的数量参考" if winter_signal else "")
+        return_note = ""
+        if return_risk:
+            return_note = (f"；本款近90天FBA售出{return_risk['sold']}双、退货{return_risk['returned']}双"
+                           f"（{return_risk['rate']:.1%}，截至{return_risk['salesEnd']}），")
+            return_note += (f"退货偏高，保守调整为{return_adjusted}双" if return_risk.get("eligible") else
+                            "退货比例偏高但样本少，本次不因退货减少建议")
+            return_note += "；近期退货可能尚未回补"
         return dict(result, quantity=quantity, status="suggest", label=f"建议补{quantity}双",
-                    reason=f"建议补{quantity}双：{calculation}，还差{shortage:g}双{rounding}。这是待你确认的估算建议。")
+                    reason=f"建议补{quantity}双：{calculation}；先按阶梯建议{staged:g}双{winter_note}{size_note}{return_note}{cost_note}{rounding}。持续未补且仍有缺口时逐步增加，库存或销量变化会重新计算。")
     return dict(result, quantity=0, status="covered", label="已有货够，暂不补",
                 reason=f"建议暂不补：{calculation}，本次无需追加。已有货仍需按计划到仓。")
+
+
+def winter_momentum_styles(rows, sales_end, as_of, transit_days, cover_days):
+    """A seasonal policy signal, based on FBA breadth and recent activity."""
+    try:
+        end = date.fromisoformat(sales_end)
+    except (TypeError, ValueError):
+        return {}
+    if not 0 <= (as_of - end).days <= 7 or as_of.month not in (10, 11, 12, 1):
+        return {}
+    season_end = date(as_of.year + (1 if as_of.month >= 10 else 0), 3, 15)
+    if as_of + timedelta(days=transit_days + cover_days) > season_end:
+        return {}
+    groups = {}
+    for row in rows:
+        if row.get("winterSeasonal") is True and row.get("supplyStage") != "planned" and row.get("fbaReplenishmentMode") != "fbm_only":
+            groups.setdefault(row["style"], []).append(row)
+    signals = {}
+    for style, group in groups.items():
+        if len(group) < 6 or any(not all(number(r.get(k)) and r[k] >= 0 for k in ("n7", "p7", "n28")) for r in group):
+            continue
+        active = sum(r["n28"] > 0 for r in group)
+        if active / len(group) >= 0.6 and sum(r["n7"] for r in group) >= 2 and sum(r["p7"] for r in group) >= 2:
+            signals[style] = dict(active=active, total=len(group), salesEnd=sales_end)
+    return signals
+
+
+def high_return_styles(report, rows, sales_end, as_of):
+    """Identify an explicitly conservative policy signal from a fresh FBA report.
+
+    Thresholds are reviewable business heuristics, not a proven prediction of
+    future returns. A point-in-time/period report is not a matured cohort.
+    """
+    if not report or report.get("days") != 90 or report.get("channel") != "FBA" or report.get("basis") != "period_fba":
+        return {}
+    try:
+        end = date.fromisoformat(report["salesEnd"])
+        snapshot_end = date.fromisoformat(sales_end)
+    except (KeyError, TypeError, ValueError):
+        return {}
+    if not 0 <= (as_of - end).days <= 7 or not 0 <= (snapshot_end - end).days <= 7:
+        return {}
+    styles = {row["sku"]: row["style"] for row in rows}
+    totals = {}
+    for item in report.get("rows", []):
+        style = styles.get(item.get("sku"))
+        sold, returned = item.get("sold"), item.get("returned")
+        if style is None or not all(number(n) and n >= 0 for n in (sold, returned)):
+            continue
+        group = totals.setdefault(style, [0, 0])
+        group[0] += sold
+        group[1] += returned
+    return {style: dict(sold=sold, returned=returned, rate=returned/sold,
+                        salesEnd=report["salesEnd"], days=90,
+                        eligible=sold >= 30 and returned >= 5)
+            for style, (sold, returned) in totals.items()
+            if sold > 0 and returned > 0 and returned / sold >= 0.20}
 
 
 class Store:
@@ -484,6 +616,43 @@ class Store:
         integer(days, "目标天数", 1, 365)
         preferences = self._style_preferences(conn)
         transit_days = self._planning_settings(conn)["transit_days"]
+        rows = self._style_rows(conn, style)
+        snapshot = self._snapshot(conn)[1]
+        return_report = next((report for report in self._list(conn, "return_report") if report["days"] == 90), None)
+        as_of = pacific_date(datetime.now(timezone.utc)) - timedelta(days=1)
+        return_risks = high_return_styles(return_report, rows, snapshot.get("salesEnd"), as_of)
+        winter_signals = winter_momentum_styles(rows, snapshot.get("salesEnd"), as_of, transit_days, days)
+        wanted = {row["sku"] for row in rows}
+        histories = {sku: [] for sku in wanted}
+        seen = set()
+        current_dates = {}
+        for row in rows:
+            try:
+                current_dates[row["sku"]] = date.fromisoformat((row.get("inventoryCapturedAtISO") or "")[:10])
+            except ValueError:
+                pass
+        supply_keys = [key for key, _ in SUPPLY_FIELDS if key != "afn_inbound_working_quantity"]
+        for rec in conn.execute("SELECT document FROM snapshots ORDER BY seq DESC LIMIT 100"):
+            document = json.loads(rec["document"])
+            for old in document.get("rows", []):
+                sku = old.get("sku")
+                if sku not in wanted or sku not in current_dates:
+                    continue
+                try:
+                    observed = date.fromisoformat((old.get("inventoryCapturedAtISO") or "")[:10])
+                except ValueError:
+                    continue
+                age = (current_dates[sku] - observed).days
+                if age <= 0 or age > 28 or (sku, observed) in seen:
+                    continue
+                seen.add((sku, observed))
+                inv = old.get("inventory") or {}
+                amounts = [inv.get(key) for key in supply_keys]
+                pending = sum(amounts) if all(number(x) and x >= 0 for x in amounts) else None
+                histories[sku].append(dict(date=observed, stock=inv.get("afn_fulfillable_quantity") if old.get("inventoryKnown") else None,
+                                           pending=pending, n28=old.get("n28")))
+        for history in histories.values():
+            history.sort(key=lambda item: item["date"], reverse=True)
         # A purchase is one supply flow. Never add its quantity to source inventory.
         unmatched = {}
         for purchase in self._list(conn, "purchase"):
@@ -502,13 +671,16 @@ class Store:
                         "ordered": line["ordered"], "shipped": line["shipped"], "received": line["received"],
                     })
         evaluated = []
-        for row in self._style_rows(conn, style):
-            result = planning_recommendation(row, days, transit_days)
+        for row in rows:
+            preference = preferences[row["style"]]
+            unit_cost_cents = purchase_unit_cents(row, preference)
+            result = planning_recommendation(row, days, transit_days, histories[row["sku"]],
+                                             return_risks.get(row["style"]), unit_cost_cents,
+                                             winter_signals.get(row["style"]))
             if row["sku"] in unmatched:
                 result.update(quantity=None, status="supply", label="暂不追加",
                               localPurchases=unmatched[row["sku"]],
                               reason="本软件已有采购尚未与系统库存核对。请先跟踪该批发货、接收及库存体现，避免再次采购同一缺口。")
-            preference = preferences[row["style"]]
             if preference["replenishment_mode"] == "seasonal_hold":
                 source_result = copy(result)
                 result.update(quantity=None, status="seasonal_hold", label="春夏再看",

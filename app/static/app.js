@@ -426,13 +426,14 @@ function renderDetail() {
   const qty=value=>number(value)?String(value):"未取到";
   const recommended=result.status==="suggest"&&result.quantity>0;
   const advice=recommended?`建议补 ${result.quantity} 双`:result.label;
-  const multiple=Number.isInteger(row.orderMultiple)&&row.orderMultiple>1?row.orderMultiple:1;
-  const reason=result.daily>0&&["suggest","covered"].includes(result.status)?`近14天售出 ${show(row.n14)} 双、近28天售出 ${show(row.n28)} 双，按较快的日均销量估算，等货及到仓后共 ${result.transitDays+result.coverDays} 天约需 ${result.planningDemand} 双。减去现货 ${qty(inv.afn_fulfillable_quantity)} 双、已发在途 ${qty(inv.afn_inbound_shipped_quantity)} 双和仓内货 ${qty(warehouse)} 双，这次建议补 ${result.quantity} 双${multiple>1?`（按每码${multiple}双倍数取整）`:""}。${result.lowSample?"销量样本少，先作小量配码参考。":""}`:result.reason;
+  const reason=result.reason;
   const flow=inboundFacts(row);
   const flowFacts=[...flow.active.map(item=>[item.label,`${item.quantity} 双`]),...flow.unknown.map(item=>[item.label,"待核"])];
   const facts=state.page==="matrix"&&state.view==="inbound"?(flowFacts.length?flowFacts:[["当前在途／仓内状态","暂无在途／仓内货"]]):[["FBA 当前可售",qty(inv.afn_fulfillable_quantity)+" 双"],["已发在途",qty(inv.afn_inbound_shipped_quantity)+" 双"],["接收 / 调仓 / 处理中",qty(warehouse)+" 双"],["预计共卖",result.daily>0?`约 ${qty(result.planningDemand)} 双`:"暂无稳定销量"]];
+  const salesFacts=[["近 7 天",row.n7],["近 14 天",row.n14],["近 28 天",row.n28]];
   return `<section id="sku-advice" class="selected-advice" aria-label="所选尺码补货详情" aria-live="polite"><div class="heading"><div><span class="muted">当前选中尺码</span><h3>${esc(row.colorLabel)} · ${esc(sizeLabel(row))}</h3></div><strong class="selected-advice-result ${recommended?"to-buy":""}">${esc(advice)}</strong></div>
     <div class="selected-advice-facts">${facts.map(([label,value])=>`<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join("")}</div>
+    <div class="selected-sales" aria-label="所选尺码FBA销量"><span class="selected-sales-title">FBA 售出${row.salesEnd?` · 截至 ${esc(row.salesEnd)}`:""}</span><div class="selected-sales-facts">${salesFacts.map(([label,value])=>`<div><span>${label}</span><strong>${number(value)?`${value} 双`:"待核"}</strong></div>`).join("")}</div></div>
     ${row.supplyNote?`<p class="variant-supply-note"><strong>发货安排：</strong>${esc(row.supplyNote)}</p>`:""}
     ${row.listingStatusText?`<p class="variant-supply-note"><strong>领星链接状态：${esc(row.listingStatusText)}</strong></p>`:""}
     <p class="selected-advice-reason"><strong>为什么这样建议：</strong>${esc(reason)}</p>
