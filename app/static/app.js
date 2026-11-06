@@ -13,13 +13,17 @@ function sizeHeader(items,size) {
 }
 const sum = (items, field) => items.reduce((n, item) => n + (number(item[field]) ? item[field] : 0), 0);
 const labels = {today:"今日提醒",matrix:"按尺码补货",plans:"全部方案与货款",purchases:"采购与到货",sales:"销量与本轮",returns:"退货分析",data:"数据与记录"};
-const state = {data:null,page:"matrix",style:null,days:35,view:"stock",sku:null,planId:null,purchaseId:null,purchaseBatchId:"all",edits:{},priceEdits:{},tierPriceEdits:{},invalid:{},dayEdits:{},rec:null,recKey:"",search:"",busy:false,audit:[],eventId:null,noticeTimer:null,saved:false};
+const state = {data:null,page:"matrix",style:null,days:35,view:"stock",salesDays:7,sku:null,planId:null,purchaseId:null,purchaseBatchId:"all",edits:{},priceEdits:{},tierPriceEdits:{},invalid:{},dayEdits:{},rec:null,recKey:"",search:"",busy:false,audit:[],eventId:null,noticeTimer:null,saved:false};
 const matrixSelection = {skus:new Set(),context:"",quantity:""};
 const returnState = {days:28,style:null,sku:null,search:"",cache:{},loading:false,error:"",requestId:0};
 let matrixGesture=null, suppressMatrixClick=false;
+const styleListScroll={};
 const rows = () => (state.data?.rows || []);
 const styleRows = () => rows().filter(row => row.style === state.style);
-const styles = () => [...new Map(rows().map(row => [row.style,{id:row.style,label:row.styleLabel}])).values()].sort((a,b)=>Number(seasonalHold(a.id))-Number(seasonalHold(b.id)));
+const styleOrderKey="shoe-replenishment-style-order-v1";
+let draggedStyle=null;
+function readStyleOrder() { try {const order=JSON.parse(localStorage.getItem(styleOrderKey)||"[]");return Array.isArray(order)?order.filter(x=>typeof x==="string"):[];}catch{return [];} }
+const styles = () => {const order=readStyleOrder(),positions=new Map(order.map((id,i)=>[id,i]));return [...new Map(rows().map(row => [row.style,{id:row.style,label:row.styleLabel}])).values()].sort((a,b)=>{const ap=positions.get(a.id),bp=positions.get(b.id);return ap!==undefined||bp!==undefined?(ap??Infinity)-(bp??Infinity):Number(seasonalHold(a.id))-Number(seasonalHold(b.id));});};
 const styleName = id => styles().find(item => item.id===id)?.label || id;
 const plan = () => state.data?.plans?.find(item => item.id===state.planId) || null;
 const purchase = () => state.data?.purchases?.find(item=>item.id===state.purchaseId) || null;
@@ -283,26 +287,32 @@ function render() {
   const navButton=key=>`<button type="button" data-page="${key}" class="${state.page===key?"active":""}" ${state.page===key?'aria-current="page"':""}>${labels[key]}</button>`;
   const secondary=["plans","purchases","data"];
   $("#navigation").innerHTML=["matrix","sales","returns"].map(navButton).join("")+`<details class="nav-more ${secondary.includes(state.page)?"active":""}"><summary>${secondary.includes(state.page)?`更多 · ${labels[state.page]}`:"更多"}</summary><div class="nav-more-items">${secondary.map(navButton).join("")}</div></details>`;
+  const oldList=$("#app .style-list[data-list-context]");
+  if(oldList)styleListScroll[oldList.dataset.listContext]=oldList.scrollTop;
   const views={today:renderToday,matrix:renderMatrix,plans:renderPlans,purchases:renderPurchases,sales:renderSales,returns:renderReturns,data:renderData};
-  $("#app").innerHTML=views[state.page]();updateSaveState();
+  $("#app").innerHTML=views[state.page]();
+  const newList=$("#app .style-list[data-list-context]");
+  if(newList)newList.scrollTop=styleListScroll[newList.dataset.listContext] || 0;
+  updateSaveState();
 }
 function selectStyleHTML() {
   return `<label class="section-picker">当前款式<select data-action="select-style">${styles().map(item=>`<option value="${esc(item.id)}" ${item.id===state.style?"selected":""}>${esc(item.label)}${seasonalHold(item.id)?" · 春夏再看":""}</option>`).join("")}</select></label>`;
 }
 function sidebar() {
-  return `<aside class="style-sidebar"><label>找款式<input type="search" id="style-search" placeholder="名称或款号" value="${esc(state.search)}"></label><div class="style-list">${styles().map(item=>`<button type="button" class="style-button ${item.id===state.style?"active":""} ${seasonalHold(item.id)?"style-seasonal":""}" data-style="${esc(item.id)}" data-search="${esc((item.label+" "+item.id).toLowerCase())}" ${!item.label.toLowerCase().includes(state.search.toLowerCase())?"hidden":""}>${productImage(item.id,"style-thumb")}<span class="style-label"><strong>${esc(item.label.replace(item.id,"").trim() || item.id)}</strong><small>${esc(item.id)}</small>${seasonalHold(item.id)?'<span class="season-tag">春夏再看</span>':""}</span></button>`).join("")}</div></aside>`;
+  return `<aside class="style-sidebar"><label>找款式<input type="search" id="style-search" placeholder="名称或款号" value="${esc(state.search)}"></label><div class="style-list" data-list-context="matrix">${styles().map(item=>`<button type="button" class="style-button ${item.id===state.style?"active":""} ${seasonalHold(item.id)?"style-seasonal":""}" data-style="${esc(item.id)}" data-search="${esc((item.label+" "+item.id).toLowerCase())}" draggable="${!state.search}" title="按住拖动调整款式顺序" ${!(item.label+" "+item.id).toLowerCase().includes(state.search.toLowerCase())?"hidden":""}>${productImage(item.id,"style-thumb")}<span class="style-label"><strong>${esc(item.label.replace(item.id,"").trim() || item.id)}</strong><small>${esc(item.id)}</small>${seasonalHold(item.id)?'<span class="season-tag">春夏再看</span>':""}</span><span class="style-drag-handle" aria-hidden="true">⠿</span></button>`).join("")}</div></aside>`;
 }
 function renderMatrix() {
   const hold=seasonalHold();const rawRec=styleRec();const rec=hold&&rawRec?{...rawRec,quantity:0,suggestedCount:0}:rawRec;const selected=plan();
   const purchasedView=state.view==="purchased";
+  const selectedRow=styleRows().find(row=>row.sku===state.sku);
   return `${renderWorkReminders()}<div class="workspace decision-workspace">${sidebar()}<section><div class="panel">
-    <div class="heading"><div class="product-heading">${productImagePath()?`<button class="image-preview-button" data-action="preview-image" aria-label="查看 ${esc(styleName(state.style))} 商品大图">${productImage(state.style)}<span>看大图</span></button>`:productImage(state.style)}<div><h1>${esc(styleName(state.style))}</h1><span class="muted">${styleRows().length} 个颜色尺码 · FBA 补货参考</span></div></div><span class="${hold?"season-tag":"tag"}">${purchasedView?"已采购 · 跟进进度":hold?"春夏再看":"建议先填，你来决定"}</span></div>
+    <div class="heading"><div class="product-heading">${productImagePath()?`<button class="image-preview-button" data-action="preview-image" aria-label="查看 ${esc(styleName(state.style))} 商品大图">${productImage(state.style)}<span>看大图</span></button>`:productImage(state.style)}<div><h1>${esc(styleName(state.style))}</h1><span class="muted">${styleRows().length} 个颜色尺码 · FBA 补货参考</span></div></div><div class="matrix-source-reference">${purchasedView?'<span class="tag">已采购 · 跟进进度</span>':hold?'<span class="season-tag">春夏再看</span>':""}${selectedRow?.listingStatusText?`<span>所选尺码链接状态核对：${selectedRow.listingStatusCapturedAtISO?esc(dateText(selectedRow.listingStatusCapturedAtISO)):"待核"}</span>`:""}</div></div>
     ${purchasedView?"":styleArrivalSummary()+historicalSummary()+variantSupplySummary()}
-    ${purchasedView?"":`<div class="controls"><span class="muted">新货到仓后，想再卖多少天</span>${[30,35,40].map(days=>`<button type="button" data-days="${days}" class="${state.days===days?"active":""}" ${!editable()?"disabled":""}>${days} 天</button>`).join("")}</div>`}
     ${purchasedView?"":hold?(state.view==="recommend"?`<div class="callout seasonal-note"><strong>春夏再看 · 本轮暂不补</strong><p>${esc(stylePreference().season_note || "这款先留到春夏再评估。库存、销量和现货缺口仍可查看，已保存的手改数量继续保留。")}</p></div>`:""):rec?decisionSummary():""}
     ${!purchasedView&&rec?inventoryOverview():""}
     ${["recommend","plan"].includes(state.view)?`<div class="decision-actions"><button type="button" class="primary" data-action="adopt" ${!editable()||!rec||hold||firstShipmentOnly()?"disabled":""}>${firstShipmentOnly()?"首发请逐码填写":"一键带入建议"}</button><button type="button" data-action="save-plan" ${!editable()?"disabled":""}>保存我的数量</button>${editable()?'<button type="button" class="primary" data-action="confirm-purchase">我已采购，确认数量</button>':`<span class="tag">本方案${planStatus(selected)}</span>`}<span class="muted">本次已填 <strong data-draft-total>${sum(mergedLines(),"quantity")}</strong> 双 · ${editable()?"保存是草稿；采购完成后再点确认":selected?.status==="cancelled"?"本方案已取消登记":"已按此数量登记采购"}</span></div>`:""}
-    <div class="controls"><span class="muted">格子看什么</span>${[["recommend","建议补货"],["plan","补货方案"],["purchased","已采购"],["stock","FBA 可售"],["inbound","已发在途"],["coverage","现货天数"],["sales","近 7 天销量"]].map(([value,label])=>`<button type="button" class="small ${state.view===value?"active":""}" data-view="${value}">${label}</button>`).join("")}</div>
+    <div class="controls matrix-view-controls"><span>格子看什么</span>${[["recommend","建议补货"],["sales","销量"],["plan","补货方案"],["purchased","已采购"],["stock","FBA 可售"],["inbound","已发在途"]].map(([value,label])=>`<button type="button" class="${state.view===value?"active":""}" data-view="${value}">${label}</button>`).join("")}</div>
+    ${state.view==="sales"?`<div class="controls sales-periods" role="group" aria-label="销量时间范围"><span>销量周期</span>${[7,28].map(days=>`<button type="button" class="${state.salesDays===days?"active":""}" data-sales-days="${days}" aria-pressed="${state.salesDays===days}">近 ${days} 天</button>`).join("")}</div>`:""}
     ${purchasedView?renderPurchasedOverview():""}
     ${state.view==="plan"?`<p class="plan-matrix-note"><strong>${selected?esc(selected.name):"本款补货草稿"}</strong></p>`:""}
     ${state.view==="inbound"?'<p class="matrix-explainer">格子只显示实际有数量的状态，例如<strong>调仓中 3 双</strong>；同一码分在几个状态时分别列出，0不重复写。状态待核会明确标出，采购和历史批次不另加进来。</p>':""}
@@ -310,7 +320,19 @@ function renderMatrix() {
     ${renderBatchFill()}
     ${purchasedView||state.view==="inbound"||rec?matrixTable():'<div class="empty">正在计算这款的建议…</div>'}
     ${purchasedView?'<p class="muted">领星核实整批发出后移入历史，不重复计入待发采购。</p>':""}
-  </div>${purchasedView?"":renderPlanSummary()}</section></div>`;
+  </div>${purchasedView?"":state.view==="stock"?renderStockSummary():state.view==="sales"?renderSalesSummary():renderPlanSummary()}</section></div>`;
+}
+function renderSalesSummary() {
+  const field=state.salesDays===28?"n28":"n7";
+  const items=styleRows(),known=items.filter(row=>number(row[field])&&row[field]>=0);
+  const missing=items.length-known.length,total=sum(known,field);
+  return `<section class="panel stock-summary" aria-label="本款FBA销量汇总"><div><span>近 ${state.salesDays} 天 FBA 销量合计</span><strong>${missing?"已知 ":""}${total} 双${missing?` <small>（${missing} 个尺码待核）</small>`:""}</strong></div></section>`;
+}
+function renderStockSummary() {
+  const items=styleRows();let quantity=0,total=0,missingPrice=0,missingStock=0;
+  for(const row of items){const stock=row.inventory?.afn_fulfillable_quantity;if(!row.inventoryKnown||!number(stock)||stock<0){missingStock++;continue;}quantity+=stock;if(stock>0){const cents=rowPriceCents(row,state.style);if(cents===null)missingPrice+=stock;else total+=stock*cents;}}
+  const value=missingPrice===quantity&&quantity>0?"待填单价":`${missingPrice||missingStock?"已知部分 ":""}${money(total)}`;
+  return `<section class="panel stock-summary" aria-label="本款FBA可售汇总"><div><span>FBA 可售合计</span><strong>${quantity} 双${missingStock?` <small>（${missingStock} 个尺码待核）</small>`:""}</strong></div><div><span>参考采购货值</span><strong>${esc(value)}</strong>${missingPrice?`<small>${missingPrice} 双缺少参考单价</small>`:""}</div><p>按各尺码可售和已记录采购参考价估算；未额外计入按批次记录的运费。</p></section>`;
 }
 function renderPlanSummary() {
   return `<section class="panel plan-summary" aria-label="本款方案汇总"><div class="plan-summary-main"><div class="plan-summary-total"><strong id="plan-total">${sum(mergedLines(),"quantity")}</strong><span>双 · ${planStatus(plan())}</span></div><div class="plan-summary-cost"><span>参考货款</span><strong data-current-cost>${esc(currentCostText())}</strong></div><button type="button" data-action="plan-options">方案详情</button></div></section>`;
@@ -382,8 +404,7 @@ function matrixTable(view=state.view) {
     let main=number(result.quantity)?result.quantity:result.label;let small=result.status==="suggest"?"建议补货":result.label;
     if(view==="stock"){main=row.fbaReplenishmentMode==="fbm_only"?"FBM":show(row.inventory?.afn_fulfillable_quantity);small=row.fbaReplenishmentMode==="fbm_only"?"自发货":"当前可售";}
     if(view==="inbound"){main=flow.active[0]?.quantity ?? (flow.unknown.length?"待核":0);small=flow.active[0]?.label || (flow.unknown.length?"状态未取全":"暂无在途／仓内货");}
-    if(view==="sales"){main=show(row.n7);small="FBA 普通销量";}
-    if(view==="coverage"){main=number(result.daily)&&result.daily>0&&number(row.inventory?.afn_fulfillable_quantity)?(row.inventory.afn_fulfillable_quantity/result.daily).toFixed(1):"待评估";small="天 · 当前现货";}
+    if(view==="sales"){main=show(state.salesDays===28?row.n28:row.n7);small="";}
     if(view==="plan"){const entry=chosen(row.sku);const invalid=Object.hasOwn(state.invalid[editKey()] || {},row.sku);const empty=!entry||entry.quantity===0;main=invalid?"未填":empty?"—":entry.quantity;small=invalid?"请填完整":empty?"未填写":entry.manual?"我已填写":"已带入建议";}
     if(view==="purchased"){const facts=purchasedForSku(row.sku);main=facts.ordered || "—";small=!facts.ordered?"未采购":facts.received===facts.ordered?"已到齐 · 待核库存":facts.received>0?`已到 ${facts.received} / ${facts.ordered}`:facts.shipped===facts.ordered?"已发货":facts.shipped>0?`已发 ${facts.shipped} / ${facts.ordered}`:facts.batches.every(({item})=>item.forwarder_handoff_confirmed)?"已交货代 · 待发":"已购未发";}
     const receiving=view==="inbound"?flow.active.slice(1).map(item=>`<small class="flow-state">${item.label} <b>${item.quantity}</b></small>`).join("")+flow.unknown.map(item=>`<small class="flow-state">${item.label}待核</small>`).join(""):"";
@@ -391,7 +412,8 @@ function matrixTable(view=state.view) {
     const recommended=view!=="purchased"&&result.status==="suggest"&&number(result.quantity)&&result.quantity>0;
     const adviceLabel=view==="purchased"?"":recommended?`，建议补 ${result.quantity} 双`:`，${result.label}`;
     const batchSelected=matrixSelection.skus.has(row.sku);
-    return `<td ${cellCoordinates}><button type="button" draggable="false" class="neutral ${["plan","purchased"].includes(view)&&number(main)&&main>0?"plan-filled":""} ${recommended?"recommend-outline":""} ${state.sku===row.sku?"selected":""} ${batchSelected?"batch-selected":""}" data-sku="${esc(row.sku)}" aria-pressed="${matrixSelection.skus.size?batchSelected:state.sku===row.sku}" aria-controls="sku-advice" aria-label="${esc(`${label} ${sizeLabel(row)} ${main} ${small}${extraLabel}${adviceLabel}`)}"><span class="matrix-batch-marker" aria-hidden="true">✓</span>${recommended?'<span class="matrix-rec-marker" aria-hidden="true">补</span>':""}<span ${view==="plan"?`data-plan-cell="${esc(row.sku)}"`:""}>${esc(main)}</span><small ${view==="plan"?`data-plan-cell-state="${esc(row.sku)}"`:""}>${esc(small)}</small>${receiving}</button></td>`;
+    const accessibleValue=view==="sales"?`近 ${state.salesDays} 天 FBA 销量 ${main} 双`:`${main} ${small}`;
+    return `<td ${cellCoordinates}><button type="button" draggable="false" class="neutral ${["plan","purchased"].includes(view)&&number(main)&&main>0?"plan-filled":""} ${recommended?"recommend-outline":""} ${state.sku===row.sku?"selected":""} ${batchSelected?"batch-selected":""}" data-sku="${esc(row.sku)}" aria-pressed="${matrixSelection.skus.size?batchSelected:state.sku===row.sku}" aria-controls="sku-advice" aria-label="${esc(`${label} ${sizeLabel(row)} ${accessibleValue}${extraLabel}${adviceLabel}`)}"><span class="matrix-batch-marker" aria-hidden="true">✓</span>${recommended?'<span class="matrix-rec-marker" aria-hidden="true">补</span>':""}<span ${view==="plan"?`data-plan-cell="${esc(row.sku)}"`:""}>${esc(main)}</span>${view==="sales"?"":`<small ${view==="plan"?`data-plan-cell-state="${esc(row.sku)}"`:""}>${esc(small)}</small>`}${receiving}</button></td>`;
   }).join("")}</tr>`;}).join("")}</tbody></table></div>`;
 }
 function renderDetail() {
@@ -412,7 +434,7 @@ function renderDetail() {
   return `<section id="sku-advice" class="selected-advice" aria-label="所选尺码补货详情" aria-live="polite"><div class="heading"><div><span class="muted">当前选中尺码</span><h3>${esc(row.colorLabel)} · ${esc(sizeLabel(row))}</h3></div><strong class="selected-advice-result ${recommended?"to-buy":""}">${esc(advice)}</strong></div>
     <div class="selected-advice-facts">${facts.map(([label,value])=>`<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join("")}</div>
     ${row.supplyNote?`<p class="variant-supply-note"><strong>发货安排：</strong>${esc(row.supplyNote)}</p>`:""}
-    ${row.listingStatusText?`<p class="variant-supply-note"><strong>领星链接状态：${esc(row.listingStatusText)}</strong> · FBA当前可售只计即时可履约数量；调仓、处理中和接收中单列，不以可售0判断能否下单。<small>链接状态核对：${esc(dateText(row.listingStatusCapturedAtISO))}</small></p>`:""}
+    ${row.listingStatusText?`<p class="variant-supply-note"><strong>领星链接状态：${esc(row.listingStatusText)}</strong></p>`:""}
     <p class="selected-advice-reason"><strong>为什么这样建议：</strong>${esc(reason)}</p>
     ${result.bridgeWarning?`<p class="bridge-warning">${esc(result.bridgeWarning)}</p>`:""}
     <div class="selected-advice-entry"><label>这个尺码，你决定补几双<input type="number" min="0" step="1" data-quantity="${esc(row.sku)}" value="${esc(inputQuantity(row.sku))}" placeholder="${number(result.quantity)?`建议 ${result.quantity}`:"未填写"}" ${!editable()?"disabled":""}></label><span>双</span>${number(result.quantity)&&!seasonalHold()?`<button type="button" class="small" data-action="fill-selected" ${!editable()||entry?.manual?"disabled":""}>填入建议 ${result.quantity} 双</button>`:""}${state.page==="matrix"&&["recommend","plan"].includes(state.view)?"":`<button type="button" class="primary" data-action="save-plan" ${!editable()?"disabled":""}>保存我的数量</button>`}<small>${entry?.manual?"已手改（含 0），自动建议会保留":"可改成你想补的数量，也可填 0"}</small></div>
@@ -587,7 +609,7 @@ async function loadReturns(force=false) {
 }
 function returnCount(value) { return number(value)?String(value):"—"; }
 function returnSidebar() {
-  return `<aside class="style-sidebar returns-sidebar"><label>找款式<input type="search" id="return-style-search" placeholder="名称或款号" value="${esc(returnState.search)}"></label><div class="style-list">${styles().map(item=>`<button type="button" class="style-button ${item.id===returnState.style?"active":""} ${seasonalHold(item.id)?"style-seasonal":""}" data-return-style="${esc(item.id)}" data-return-search="${esc((item.label+" "+item.id).toLowerCase())}" ${(item.label+" "+item.id).toLowerCase().includes(returnState.search.toLowerCase())?"":"hidden"} ${item.id===returnState.style?'aria-current="true"':""}>${productImage(item.id,"style-thumb")}<span class="style-label"><strong>${esc(item.label.replace(item.id,"").trim() || item.id)}</strong><small>${esc(item.id)}</small>${seasonalHold(item.id)?'<span class="season-tag">春夏再看</span>':""}</span></button>`).join("")}</div></aside>`;
+  return `<aside class="style-sidebar returns-sidebar"><label>找款式<input type="search" id="return-style-search" placeholder="名称或款号" value="${esc(returnState.search)}"></label><div class="style-list" data-list-context="returns">${styles().map(item=>`<button type="button" class="style-button ${item.id===returnState.style?"active":""} ${seasonalHold(item.id)?"style-seasonal":""}" data-return-style="${esc(item.id)}" data-return-search="${esc((item.label+" "+item.id).toLowerCase())}" ${(item.label+" "+item.id).toLowerCase().includes(returnState.search.toLowerCase())?"":"hidden"} ${item.id===returnState.style?'aria-current="true"':""}>${productImage(item.id,"style-thumb")}<span class="style-label"><strong>${esc(item.label.replace(item.id,"").trim() || item.id)}</strong><small>${esc(item.id)}</small>${seasonalHold(item.id)?'<span class="season-tag">春夏再看</span>':""}</span></button>`).join("")}</div></aside>`;
 }
 function returnColorFocus() {
   const colors=returnColors();
@@ -701,7 +723,7 @@ function planOptionsModal() {
   openModal(`<div class="heading"><h2 id="plan-options-title">方案详情</h2><button type="button" data-action="close-modal">关闭</button></div><p><strong>${esc(current?.name || styleName(state.style)+" · 当前草稿")}</strong> · ${sum(mergedLines(),"quantity")} 双 · ${planStatus(current)}</p>${renderCurrentCost()}<div id="moq-note">${moqNote()}</div><div class="link-row"><button type="button" data-action="new-plan">新建另一份方案</button>${current?`<a class="button" href="/api/plans/${encodeURIComponent(current.id)}/export.csv">导出已保存方案 CSV</a>`:""}<button type="button" data-page="plans">全部方案与货款</button></div><p class="muted" style="margin-top:14px">配码在尺码格子中修改和保存；导出只包含已保存数量。</p>`);
 }
 function newPlanModal() {
-  openModal(`<h2>新建补货方案</h2><p class="muted">每次只处理一款，方便后续核对。</p><form id="new-plan-form"><div class="form-grid"><label class="full">款式<select name="style">${styles().map(item=>`<option value="${esc(item.id)}" ${item.id===state.style?"selected":""}>${esc(item.label)}</option>`).join("")}</select></label><label class="full">方案名称<input name="name" required maxlength="120" value="${esc(styleName(state.style)+" · "+localToday())}"></label><label>参考需求天数<select name="days">${[30,35,40].map(day=>`<option ${day===state.days?"selected":""}>${day}</option>`).join("")}</select></label></div><div class="form-actions"><button type="button" data-action="close-modal">取消</button><button class="primary" type="submit">新建并去配码</button></div></form>`);
+  openModal(`<h2>新建补货方案</h2><p class="muted">每次只处理一款，方便后续核对。</p><form id="new-plan-form"><div class="form-grid"><label class="full">款式<select name="style">${styles().map(item=>`<option value="${esc(item.id)}" ${item.id===state.style?"selected":""}>${esc(item.label)}</option>`).join("")}</select></label><label class="full">方案名称<input name="name" required maxlength="120" value="${esc(styleName(state.style)+" · "+localToday())}"></label><label>参考需求天数<select name="days">${[30,35,40].map(day=>`<option ${day===35?"selected":""}>${day}</option>`).join("")}</select></label></div><div class="form-actions"><button type="button" data-action="close-modal">取消</button><button class="primary" type="submit">新建并去配码</button></div></form>`);
 }
 function feedbackModal() {
   openModal(`<h2>记录页面意见</h2><p class="muted">例如：看不懂哪个数字、希望把哪个内容放在前面。</p><form id="feedback-form"><label>你的意见<textarea name="text" required maxlength="4000" placeholder="直接写你的想法…"></textarea></label><div class="form-actions"><button type="button" data-action="close-modal">取消</button><button type="submit" class="primary">保存意见</button></div></form>`);
@@ -804,7 +826,33 @@ document.addEventListener("pointerup",event=>{
   finishMatrixGesture();
 });
 document.addEventListener("pointercancel",event=>{if(matrixGesture?.pointerId===event.pointerId)finishMatrixGesture(true);});
-document.addEventListener("dragstart",event=>{if(event.target.closest?.('.matrix[data-matrix-selectable="true"]'))event.preventDefault();});
+document.addEventListener("dragstart",event=>{
+  if(event.target.closest?.('.matrix[data-matrix-selectable="true"]')){event.preventDefault();return;}
+  const button=event.target.closest?.('.style-sidebar .style-button[data-style]');
+  if(!button||state.search)return;
+  draggedStyle=button.dataset.style;button.classList.add("style-dragging");
+  if(event.dataTransfer){event.dataTransfer.effectAllowed="move";event.dataTransfer.setData("text/plain",draggedStyle);}
+});
+document.addEventListener("dragover",event=>{
+  const target=event.target.closest?.('.style-sidebar .style-button[data-style]');
+  if(!draggedStyle||!target||target.dataset.style===draggedStyle)return;
+  event.preventDefault();if(event.dataTransfer)event.dataTransfer.dropEffect="move";
+  document.querySelectorAll(".style-drop-before,.style-drop-after").forEach(el=>el.classList.remove("style-drop-before","style-drop-after"));
+  const rect=target.getBoundingClientRect(),horizontal=matchMedia("(max-width: 680px)").matches;
+  const after=horizontal?event.clientX>rect.left+rect.width/2:event.clientY>rect.top+rect.height/2;
+  target.classList.add(after?"style-drop-after":"style-drop-before");
+});
+document.addEventListener("drop",event=>{
+  const target=event.target.closest?.('.style-sidebar .style-button[data-style]');
+  if(!draggedStyle||!target||target.dataset.style===draggedStyle)return;
+  event.preventDefault();const rect=target.getBoundingClientRect(),horizontal=matchMedia("(max-width: 680px)").matches;
+  const after=horizontal?event.clientX>rect.left+rect.width/2:event.clientY>rect.top+rect.height/2;
+  const order=styles().map(item=>item.id).filter(id=>id!==draggedStyle),index=order.indexOf(target.dataset.style);
+  if(index<0)return;order.splice(index+(after?1:0),0,draggedStyle);
+  try{localStorage.setItem(styleOrderKey,JSON.stringify(order));draggedStyle=null;render();notify("款式顺序已保存到当前浏览器。");}catch{draggedStyle=null;alertError("无法保存款式顺序，请检查浏览器是否允许保存本地数据。");}
+});
+document.addEventListener("dragend",()=>{draggedStyle=null;document.querySelectorAll(".style-dragging,.style-drop-before,.style-drop-after").forEach(el=>el.classList.remove("style-dragging","style-drop-before","style-drop-after"));});
+
 window.addEventListener("blur",()=>finishMatrixGesture());
 document.addEventListener("click",event=>{
   if(suppressMatrixClick&&event.detail>0){suppressMatrixClick=false;event.preventDefault();event.stopPropagation();return;}
@@ -816,6 +864,7 @@ document.addEventListener("click",event=>{
   if(button.dataset.returnSku){returnState.sku=button.dataset.returnSku;render();$("#returns-sku-detail")?.scrollIntoView({block:"nearest",behavior:"auto"});return;}
   if(button.dataset.style){action(()=>selectStyle(button.dataset.style));return;}
   if(button.dataset.days){action(()=>changeDays(button.dataset.days));return;}
+  if(button.dataset.salesDays){state.salesDays=Number(button.dataset.salesDays);render();return;}
   if(button.dataset.view){state.view=button.dataset.view;pickPurchasedSku();render();return;}
   if(button.dataset.cancelPurchase){cancelPurchaseModal(button.dataset.cancelPurchase);return;}
   if(button.dataset.sku){
@@ -915,7 +964,7 @@ document.addEventListener("input",event=>{
   if(input.dataset.purchasePrice){state.priceEdits[input.dataset.purchasePrice]=input.value;document.querySelectorAll("[data-current-cost]").forEach(el=>el.textContent=currentCostText());updateSaveState();return;}
   if(input.id==="return-style-search"){returnState.search=input.value;document.querySelectorAll(".returns-sidebar .style-button").forEach(button=>{button.hidden=!button.dataset.returnSearch.includes(input.value.toLowerCase());});return;}
   if(input.id==="style-search"){
-    state.search=input.value;document.querySelectorAll(".style-sidebar .style-button[data-style]").forEach(button=>{button.hidden=!button.dataset.search.includes(input.value.toLowerCase());button.draggable=!input.value;});return;
+    state.search=input.value;document.querySelectorAll(".style-sidebar .style-button[data-style]").forEach(button=>{button.hidden=!button.dataset.search.includes(input.value.toLowerCase());button.draggable=!input.value;button.draggable=!input.value;});return;
   }
   if(input.dataset.quantity){
     if(!editable())return;

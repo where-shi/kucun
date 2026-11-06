@@ -171,3 +171,23 @@
   .returns-workspace .returns-matrix .return-cell,.returns-workspace .returns-matrix .dash{min-width:78px}
   .returns-workspace .returns-matrix .return-color-total,.returns-workspace .returns-matrix .return-color-total-heading{min-width:105px}
 }
+
+.style-sidebar .style-button[data-style][draggable=true]{cursor:grab}.style-sidebar .style-button[data-style].style-dragging{opacity:.45;cursor:grabbing}.style-drag-handle{margin-left:auto;color:#a0b2a9;font-size:19px;line-height:1;flex:0 0 auto}.style-drop-before{box-shadow:inset 0 4px var(--green)}.style-drop-after{box-shadow:inset 0 -4px var(--green)}@media(max-width:680px){.style-drop-before{box-shadow:inset 4px 0 var(--green)}.style-drop-after{box-shadow:inset -4px 0 var(--green)}}
+
+.matrix-view-controls{gap:8px;margin:16px 0}
+@media(min-width:681px){
+  .decision-workspace>.style-sidebar{position:sticky;top:12px;align-self:start;display:flex;flex-direction:column;max-height:calc(100vh - 24px)}
+  .decision-workspace>.style-sidebar>.style-list{min-height:0;overflow-y:auto;overflow-x:hidden;padding:2px 5px 2px 2px;scrollbar-gutter:stable}
+}
+.stock-summary{display:flex;align-items:center;gap:20px 48px;flex-wrap:wrap}
+.stock-summary div>span,.stock-summary div>small{display:block;color:var(--muted);font-size:12px}
+.stock-summary div>strong{display:block;font-size:22px;line-height:1.5}
+.stock-summary strong small{font-size:12px;font-weight:400;color:var(--muted)}
+.stock-summary p{flex-basis:100%;margin:0;color:var(--muted);font-size:12px}
+.matrix-source-reference{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;color:var(--muted);font-size:12px;line-height:1.5}
+.matrix-view-controls>span{font-size:14px;color:var(--muted)}
+.matrix-view-controls button{min-height:40px;padding:8px 14px;font-size:14px;font-weight:600}
+.sales-periods{gap:10px;margin:16px 0}
+.sales-periods>span{font-size:14px;font-weight:600}
+.sales-periods button{min-width:104px;min-height:44px;padding:9px 16px;font-size:15px;font-weight:600}
+.sales-periods button.active{background:var(--green);border-color:var(--green);color:#fff}
